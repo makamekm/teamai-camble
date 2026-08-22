@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 1,
+  "id": "camble-release",
+  "name": "Camble Release",
+  "description": "Декларативное продвижение Camble через GitHub refs без анализа diff и выполнения удалённого кода.",
+  "refreshMinutes": 60,
+  "repositories": [
+    {
+      "id": "application3",
+      "label": "application3",
+      "owner": "ruletvorg",
+      "name": "application3"
+    },
+    {
+      "id": "backend",
+      "label": "backend",
+      "owner": "ruletvorg",
+      "name": "backend"
+    }
+  ],
+  "environments": [
+    {
+      "id": "preprod",
+      "label": "Preprod",
+      "description": "Ручной выбор application3 и backend-сервисов из services/ на точных dev SHA.",
+      "collect": {
+        "refs": [
+          {
+            "id": "application3-dev",
+            "repository": "application3",
+            "ref": "heads/dev",
+            "label": "application3 dev"
+          },
+          {
+            "id": "backend-dev",
+            "repository": "backend",
+            "ref": "heads/dev",
+            "label": "backend dev"
+          }
+        ],
+        "items": [
+          {
+            "type": "static",
+            "id": "application3",
+            "label": "application3",
+            "sourceRef": "application3-dev"
+          },
+          {
+            "type": "directory",
+            "repository": "backend",
+            "path": "services",
+            "sourceRef": "backend-dev"
+          }
+        ]
+      },
+      "deploy": {
+        "selection": "manual",
+        "confirm": "Продвинуть только выбранные компоненты в Preprod? Невыбранные refs не изменятся.",
+        "rules": [
+          {
+            "select": {
+              "type": "exact",
+              "item": "application3"
+            },
+            "sourceRef": "application3-dev",
+            "targets": [
+              {
+                "type": "branch",
+                "repository": "application3",
+                "nameTemplate": "preprod"
+              }
+            ]
+          },
+          {
+            "select": {
+              "type": "exact",
+              "item": "component"
+            },
+            "sourceRef": "backend-dev",
+            "targets": [
+              {
+                "type": "branch",
+                "repository": "backend",
+                "nameTemplate": "preprod"
+              }
+            ]
+          },
+          {
+            "select": {
+              "type": "remaining"
+            },
+            "sourceRef": "backend-dev",
+            "targets": [
+              {
+                "type": "immutableTagAndBranch",
+                "repository": "backend",
+                "tagTemplate": "{item}-{n}",
+                "branchTemplate": "tags/{item}"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "prod",
+      "label": "Prod",
+      "description": "Полное продвижение application3 и backend из Preprod в Prod.",
+      "collect": {
+        "refs": [
+          {
+            "id": "application3-preprod",
+            "repository": "application3",
+            "ref": "heads/preprod",
+            "label": "application3 preprod"
+          },
+          {
+            "id": "backend-preprod",
+            "repository": "backend",
+            "ref": "heads/preprod",
+            "label": "backend preprod"
+          }
+        ],
+        "items": [
+          {
+            "type": "static",
+            "id": "application3",
+            "label": "application3",
+            "sourceRef": "application3-preprod"
+          },
+          {
+            "type": "static",
+            "id": "backend",
+            "label": "backend",
+            "sourceRef": "backend-preprod"
+          }
+        ]
+      },
+      "deploy": {
+        "selection": "all",
+        "confirm": "Продвинуть application3 и backend целиком из Preprod в Prod?",
+        "rules": [
+          {
+            "select": {
+              "type": "exact",
+              "item": "application3"
+            },
+            "sourceRef": "application3-preprod",
+            "targets": [
+              {
+                "type": "branch",
+                "repository": "application3",
+                "nameTemplate": "prod"
+              }
+            ]
+          },
+          {
+            "select": {
+              "type": "exact",
+              "item": "backend"
+            },
+            "sourceRef": "backend-preprod",
+            "targets": [
+              {
+                "type": "branch",
+                "repository": "backend",
+                "nameTemplate": "prod"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
