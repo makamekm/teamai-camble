@@ -37,10 +37,23 @@
         "provider": "googlePlay",
         "track": "internal"
       },
+      "artifactApplication": {
+        "key": "camble/android",
+        "name": "Camble Android",
+        "packageName": "com.rulettv.app"
+      },
       "releaseTagPrefix": "android-build-",
       "publicRetain": 5
     }
   ],
+  "versionManagement": {
+    "workflowFile": "version-apply.yml",
+    "workflowRef": "dev",
+    "application": {
+      "repository": "application3",
+      "ref": "heads/dev"
+    }
+  },
   "environments": [
     {
       "id": "preprod",
