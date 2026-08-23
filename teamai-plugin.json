@@ -24,7 +24,7 @@
       "label": "Camble Android",
       "platform": "android",
       "workflowFile": "android-build.yml",
-      "workflowRef": "main",
+      "workflowRef": "dev",
       "application": {
         "repository": "application3",
         "ref": "heads/dev"

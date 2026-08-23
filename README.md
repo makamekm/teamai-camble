@@ -1,6 +1,6 @@
 # Camble Release plugin for TeamAI
 
-Репозиторий содержит декларативный manifest `teamai-plugin.json` и проверенный GitHub Actions workflow для Android cloud build. TeamAI не загружает и не исполняет workflow-код на своём сервере: он передаёт только точные SHA и отслеживает GitHub run через REST API.
+Репозиторий содержит декларативный manifest `teamai-plugin.json`. Проверенный Android workflow хранится в `ruletvorg/application3/.github/workflows/android-build.yml`; TeamAI не исполняет его на своём сервере, а передаёт точные SHA и отслеживает cloud run через REST API.
 
 ## Подключение
 
@@ -38,7 +38,7 @@ GitHub операции не транзакционны: при внешней �
 
 ## Android cloud build
 
-Кнопка «Собрать и отправить» запускает `.github/workflows/android-build.yml` на точных SHA `application3:dev` и `backend:dev`. Workflow:
+Кнопка «Собрать и отправить» запускает workflow `ruletvorg/application3:.github/workflows/android-build.yml` на точных SHA `application3:dev` и `backend:dev`. Workflow:
 
 1. клонирует оба private-репозитория по SHA;
 2. выполняет `npm run preinit` с локальным `BACKEND_DIR`;
@@ -51,6 +51,7 @@ TeamAI допускает только один cloud build одновремен
 Actions secrets:
 
 - `BUILD_REPOSITORY_TOKEN` — read private `ruletvorg/application3` и `ruletvorg/backend`;
+- `PUBLIC_RELEASE_TOKEN` — публикация assets в public `makamekm/teamai-camble`;
 - `ANDROID_UPLOAD_KEYSTORE_BASE64`;
 - `ANDROID_UPLOAD_STORE_PASSWORD`;
 - `ANDROID_UPLOAD_KEY_ALIAS`;
