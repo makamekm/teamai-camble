@@ -18,6 +18,29 @@
       "name": "backend"
     }
   ],
+  "builds": [
+    {
+      "id": "android",
+      "label": "Camble Android",
+      "platform": "android",
+      "workflowFile": "android-build.yml",
+      "workflowRef": "main",
+      "application": {
+        "repository": "application3",
+        "ref": "heads/dev"
+      },
+      "backend": {
+        "repository": "backend",
+        "ref": "heads/dev"
+      },
+      "store": {
+        "provider": "googlePlay",
+        "track": "internal"
+      },
+      "releaseTagPrefix": "android-build-",
+      "publicRetain": 5
+    }
+  ],
   "environments": [
     {
       "id": "preprod",
