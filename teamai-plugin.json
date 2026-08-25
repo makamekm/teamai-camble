@@ -23,8 +23,7 @@
       "id": "android",
       "label": "Camble Android",
       "platform": "android",
-      "workflowFile": "android-build.yml",
-      "workflowRef": "dev",
+      "profile": "cambleAndroid",
       "application": {
         "repository": "application3",
         "ref": "heads/dev"
@@ -41,9 +40,7 @@
         "key": "camble/android",
         "name": "Camble Android",
         "packageName": "com.rulettv.app"
-      },
-      "releaseTagPrefix": "android-build-",
-      "publicRetain": 5
+      }
     }
   ],
   "versionManagement": {
