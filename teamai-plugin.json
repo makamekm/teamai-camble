@@ -51,6 +51,43 @@
       "ref": "heads/dev"
     }
   },
+  "cluster": {
+    "namespace": "camee",
+    "services": [
+      {
+        "id": "application3",
+        "repository": "application3",
+        "deployment": "application-camee",
+        "container": "application-camee"
+      },
+      {
+        "id": "admin-ui",
+        "repository": "backend",
+        "deployment": "admin-camee",
+        "container": "admin-camee"
+      },
+      {
+        "id": "component",
+        "repository": "backend",
+        "deployment": "component-camee",
+        "container": "component-camee"
+      }
+    ],
+    "targetBranchTemplate": "tags/{item}",
+    "tagTemplate": "{item}-{n}",
+    "rolloutTimeoutSeconds": 900
+  },
+  "mcp": {
+    "extensions": [
+      "inspect",
+      "environment.collect",
+      "environment.deploy",
+      "build",
+      "version",
+      "cluster.observe",
+      "cluster.deploy"
+    ]
+  },
   "environments": [
     {
       "id": "preprod",
