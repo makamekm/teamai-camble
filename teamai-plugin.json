@@ -58,19 +58,19 @@
         "id": "application3",
         "repository": "application3",
         "deployment": "application-camee",
-        "container": "application-camee"
+        "container": "application"
       },
       {
         "id": "admin-ui",
         "repository": "backend",
         "deployment": "admin-camee",
-        "container": "admin-camee"
+        "container": "admin"
       },
       {
         "id": "component",
         "repository": "backend",
         "deployment": "component-camee",
-        "container": "component-camee"
+        "container": "component"
       }
     ],
     "targetBranchTemplate": "tags/{item}",
