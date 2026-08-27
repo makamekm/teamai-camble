@@ -59,7 +59,7 @@
         "repository": "application3",
         "deployment": "application-camee",
         "container": "application",
-        "targetBranch": "tags/application"
+        "targetBranch": "tags/component"
       },
       {
         "id": "admin-ui",
