@@ -1,59 +1,35 @@
 # Camble Release plugin for TeamAI
 
-Репозиторий содержит декларативный manifest `teamai-plugin.json`. Проверенный Android workflow хранится в `ruletvorg/application3/.github/workflows/android-build.yml`; TeamAI не исполняет его на своём сервере, а передаёт точные SHA и отслеживает cloud run через REST API.
+Executable external plugin implementing TeamAI plugin contract v2. TeamAI pins this repository commit and a free agent runs `node plugin.mjs` with the versioned JSON request on stdin. Product policy and procedures live here rather than in TeamAI core.
 
-## Подключение
+## Actions
 
-1. Откройте настройки проекта Camble в TeamAI.
-2. Укажите GitHub HTTPS token проекта с read/write доступом к `ruletvorg/application3` и `ruletvorg/backend`.
-3. В секции «Плагины проекта» добавьте `https://github.com/makamekm/teamai-camble`.
-4. Откройте страницу «Плагины» и нажмите «Собрать данные» в нужной вкладке.
+- `collect` — resolves exact `application3`/`backend` source SHAs. Preprod collection reads service directories from `backend/services` at the exact `dev` SHA; Prod collects both `preprod` SHAs.
+- `promote` — verifies the collected SHAs have not moved. Preprod treats `application3` and `component` specially and gives every other backend item an immutable `<item>-N` tag plus `tags/<item>` branch. Prod compare-and-swaps each destination branch against its preflight SHA. If the second repository update fails, rollback compare-and-swaps the first branch only when it still contains the plugin-written SHA, so concurrent changes are preserved and reported as lease conflicts.
+- `version-inspect` / `version-apply` — reads `app.json` on `application3:dev`, validates equal iOS/Android build numbers, requires the next build number, and dispatches `version-apply.yml` with `expectedSha`. SemVer prerelease and build metadata are accepted.
+- `android-build` — first verifies that both supplied SHAs are the current `preprod` tips, then clones them, runs Camble preinit, validates equal iOS/Android build numbers, builds signed APK+AAB, declares both artifacts, and optionally uploads the AAB to the fixed Google Play Internal track.
+- `cluster-observe` — reads the fixed `camee` deployment/container mapping and its active pods through `kubectl`. A service is ready only when its deployment image carries a full 40-character source SHA and every matching running pod is ready on that exact image with one valid, identical `sha256` imageID digest. Truncated tags, mixed digests, missing pods, and image mismatches fail closed.
+- `cluster-deploy` — accepts `dev` or a bounded test/feature/fix branch and preflights every source, destination branch, and deterministic `refs/tags/<service>-<full-source-SHA>` provenance tag. It safely creates or reuses all immutable tags before compare-and-swapping Devtron branches. After rollout it locks the observed pod digest for each selected service and re-reads the exact deployments and pods to verify the full SHA/digest pair. A timeout or later failure rolls back only branches written by this invocation, using the plugin-written SHA as the rollback lease; retained immutable tags and all original/apply/rollback outcomes are returned. `application3` deliberately advances its own `tags/component`; backend services advance `tags/<item>`.
 
-Настраивать URL и запускать deploy может только администратор. Читать manifest/history, обновлять manifest и собирать свежий snapshot может любой вошедший пользователь.
+All write actions support `dryRun` and default it to `true`. Dry runs calculate and return the complete plan but perform no GitHub, Google Play, or Kubernetes mutation.
 
-## Preprod
+## Request and response
 
-«Собрать данные» читает через GitHub REST точные SHA веток `application3:dev` и `backend:dev`, затем перечисляет каталоги непосредственно в `backend/services/`. Diff и список изменённых файлов не запрашиваются и не используются: выбор сервисов всегда ручной.
+The entrypoint accepts one bounded TeamAI `apiVersion: 1` request on stdin. It recognizes `actionId` (and the equivalent `action.id`), `input`, declared repositories with authenticated HTTPS URLs, an absolute temporary workspace path, and supplied secrets. Boolean inputs must be JSON booleans. It emits one contract response on stdout and exits nonzero for errors. Subprocess stderr is never copied into that response, known secret values are redacted, and subprocesses inherit only an operational environment allowlist plus explicitly scoped command values.
 
-Deploy меняет только refs для выбранных пунктов:
+Required Android secrets for a real build:
 
-- `application3` обновляет `application3:preprod` до сохранённого `application3:dev` SHA;
-- `component` обновляет `backend:preprod` до сохранённого `backend:dev` SHA;
-- любой другой выбранный каталог `services/<service>` создаёт новый immutable lightweight tag `<service>-N` на сохранённом `backend:dev` SHA и обновляет branch `tags/<service>` до того же SHA.
+- `ANDROID_UPLOAD_KEYSTORE_BASE64`
+- `ANDROID_UPLOAD_STORE_PASSWORD`
+- `ANDROID_UPLOAD_KEY_ALIAS`
+- `ANDROID_UPLOAD_KEY_PASSWORD`
 
-Имена используются буквально. В частности, `admin-ui` остаётся `admin-ui` и никогда не преобразуется в `admin`. Невыбранные сервисы не создают и не обновляют ни одного ref.
+Optional Play upload secret: `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`. `version-apply` requires the scoped repository/GitHub token supplied by the agent.
 
-## Prod
+## Verification
 
-«Собрать данные» сохраняет SHA `application3:preprod` и `backend:preprod`. Deploy всегда продвигает оба репозитория целиком:
+```bash
+npm test
+```
 
-- `application3:preprod` → `application3:prod`;
-- `backend:preprod` → `backend:prod`.
-
-## Защита от гонок
-
-Каждый deploy принимает ID сохранённого snapshot. Перед первой GitHub-мутацией TeamAI проверяет, что snapshot последний, manifest не менялся, а все source refs всё ещё указывают на сохранённые SHA. При расхождении нужно снова нажать «Собрать данные». Для одного plugin environment одновременно разрешён только один deploy.
-
-GitHub операции не транзакционны: при внешней ошибке уже выполненные шаги не откатываются. Поэтому TeamAI сохраняет точный план, поэтапный прогресс, ошибку и историю для ручного разбора частичного результата.
-
-## Android cloud build
-
-Кнопка «Собрать и отправить» запускает workflow `ruletvorg/application3:.github/workflows/android-build.yml` на точных SHA `application3:dev` и `backend:dev`. Workflow:
-
-1. клонирует оба private-репозитория по SHA;
-2. выполняет `npm run preinit` с локальным `BACKEND_DIR`;
-3. собирает подписанные APK и AAB с уникальным `versionCode`;
-4. загружает AAB в Google Play Internal;
-5. создаёт публичный GitHub Release с `camble.apk`, `camble.aab` и `build-info.json`.
-
-TeamAI допускает только один cloud build одновременно, продолжает reconciliation через cron после перезапуска и удаляет releases старше последних пяти.
-
-Actions secrets:
-
-- `BUILD_REPOSITORY_TOKEN` — read private `ruletvorg/application3` и `ruletvorg/backend`;
-- `PUBLIC_RELEASE_TOKEN` — публикация assets в public `makamekm/teamai-camble`;
-- `ANDROID_UPLOAD_KEYSTORE_BASE64`;
-- `ANDROID_UPLOAD_STORE_PASSWORD`;
-- `ANDROID_UPLOAD_KEY_ALIAS`;
-- `ANDROID_UPLOAD_KEY_PASSWORD`;
-- `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`.
+The test suite injects a fake command runner and synthetic Git/Kubernetes fixtures. It covers reads, mutation planning, stale-SHA and input validation, special Camble ref rules, and dry-run non-mutation. It never contacts or mutates GitHub, Google Play, or Kubernetes.
