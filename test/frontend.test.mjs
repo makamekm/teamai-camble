@@ -23,39 +23,26 @@ test("React mini-frontend declares and registers the versioned TeamAI host contr
   assert.match(entry, /root\.unmount\(\)/);
 });
 
-test("Camble mini-frontend preserves release console functionality and visual affordances", () => {
+test("Camble mini-frontend restores the original Preprod/Prod release workspace", () => {
   const component = source("src/camble-release-console.tsx");
   const css = source("src/camble-release-console.css");
   for (const label of [
     "Preprod", "Prod", "Собрать данные", "Выберите сервисы",
     "Полный состав окружения", "TeamAI обновит только отмеченные refs.",
-    "Развернуть", "История и прогресс", "Проверить версию",
-    "Текущая версия", "Текущий commit", "Следующий build", "План версии",
-    "Применить версию", "Android из последнего Preprod snapshot",
-    "Google Play Internal", "Агент сборки", "План сборки", "Собрать Android",
-    "Состояние кластера", "Deployment", "Image", "Full SHA", "Digest",
-    "Readiness", "Pods", "Маппинг сервисов", "План deploy",
-    "Применить deploy", "Полная история и прогресс", "Structured output",
-    "Failure", "Rollback", "Artifacts",
-  ]) assert.ok(component.includes(label), `missing Camble label: ${label}`);
-  assert.doesNotMatch(component, /Собрать точный snapshot|<h4>1\. Snapshot<\/h4>/);
+    "Развернуть", "История и прогресс", "Данные ещё не собраны",
+  ]) assert.ok(component.includes(label), `missing original Camble label: ${label}`);
+  for (const removed of ["Проверить версию", "Собрать Android", "Состояние кластера", "Source branch", "Маппинг сервисов"]) {
+    assert.ok(!component.includes(removed), `non-original workspace leaked into UI: ${removed}`);
+  }
+  assert.match(component, /const REQUIRED_ACTIONS = \["collect", "promote"\]/);
   assert.match(component, /role="tablist" aria-label="Camble release environment"/);
   assert.match(component, /snapshot\.items\)\.map/);
   assert.match(component, /latestCollectSnapshot/);
-  assert.match(component, /latestVersionInspection/);
-  assert.match(component, /latestPreprodSnapshot/);
   assert.match(component, /operation\.progress\.map/);
-  assert.match(component, /operation\.result\?\.output/);
-  assert.match(component, /operation\.result\.artifacts/);
-  assert.match(component, /inspection\.commitSha/);
-  assert.match(component, /text\(pod\.pod\) \|\| text\(pod\.name\)/);
-  assert.match(component, /output\.rollback \?\? object\(output\.failure\)\.rollback/);
-  assert.match(component, /operation\.actionId !== null && \["cluster-observe", "cluster-deploy"\]\.includes\(operation\.actionId\)/);
   assert.match(component, /REQUIRED_ACTIONS\.filter/);
   assert.match(css, /\.plugin-action-button\s*\{[^}]*border:\s*1px solid/);
-  assert.match(css, /\.camble-release-console/);
-  assert.match(css, /\.camble-cluster-card/);
-  assert.match(css, /@media \(max-width: 900px\)[^{]*\{[^}]*\.camble-release-grid/);
+  assert.match(css, /\.camble-original-release/);
+  assert.match(css, /@media \(max-width: 560px\)/);
 });
 
 test("production bundle contains the registered mini-frontend and stylesheet", () => {
