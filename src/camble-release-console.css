@@ -114,5 +114,35 @@
 .camble-cluster-deploy fieldset { min-width: 0; padding: 0; border: 0; }.camble-cluster-deploy legend { margin-bottom: 7px; color: var(--muted); font-size: 9px; }
 .camble-operation-meta { padding: 8px 12px; display: flex; gap: 16px; color: var(--muted); font-size: 9px; border-bottom: 1px solid var(--line-soft); }
 .camble-history .plugin-result h4 { margin: 12px 0 6px; color: var(--muted); font-size: 9px; text-transform: uppercase; }
-@media (max-width: 900px) { .camble-release-grid, .camble-form-grid { grid-template-columns: 1fr; }.camble-form-grid .camble-actions { grid-column: 1; }.camble-inline-meta { grid-template-columns: auto minmax(0,1fr) !important; }.camble-actions { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }.camble-actions .plugin-action-button { min-width: 0; width: 100%; }.camble-original-release .plugin-items { grid-template-columns: repeat(2,minmax(0,1fr)); }.camble-collect-controls, .camble-deploy-controls { align-items: stretch; flex-direction: column; }.camble-collect-controls .camble-agent, .camble-deploy-controls .camble-agent { min-width: 0; } }
-@media (max-width: 560px) { .camble-release-section { padding: 12px 10px; }.camble-release-section > header { gap: 8px; }.camble-items, .camble-cluster-grid, .camble-actions, .camble-original-release .plugin-items { grid-template-columns: 1fr; }.camble-panel dl, .camble-cluster-card dl { grid-template-columns: 1fr; }.camble-panel dt, .camble-cluster-card dt { margin-top: 5px; }.camble-selection-heading { align-items: stretch; flex-direction: column; }.camble-selection-heading button { width: 100%; }.camble-operation-meta { flex-direction: column; gap: 4px; }.camble-original-release .plugin-environment { padding: 12px 10px; }.camble-original-release .plugin-environment-intro, .camble-original-release .plugin-deploy-bar { align-items: stretch; flex-direction: column; }.camble-original-release .plugin-tabs { padding: 0 8px; }.camble-original-release .plugin-tabs button { min-width: 90px; }.camble-original-release .camble-release-history { margin: 0 10px 12px; } }
+.camble-release-workspace { display:grid; gap:0; border:1px solid var(--border); border-radius:0 0 16px 16px; overflow:hidden; background:var(--panel); }
+.camble-workspace-tabs { grid-template-columns:repeat(4,minmax(0,1fr)); }
+.camble-tab-panel { display:grid; gap:18px; padding:20px; }
+.camble-tab-heading { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; }
+.camble-tab-heading span { color:var(--accent); font-size:11px; font-weight:800; letter-spacing:.12em; }
+.camble-tab-heading h3 { margin:5px 0; }
+.camble-tab-heading p { margin:0; color:var(--muted); }
+.camble-tab-heading > svg { color:var(--accent); width:24px; height:24px; }
+.camble-version-grid { display:grid; grid-template-columns:minmax(300px,.8fr) minmax(320px,1.2fr); gap:14px; }
+.camble-version-form { display:grid; grid-template-columns:minmax(180px,1fr) minmax(160px,.6fr) minmax(240px,1fr) auto; gap:12px; align-items:end; }
+.camble-version-current dl, .camble-version-current { margin:0; }
+.camble-version-current { display:grid; grid-template-columns:auto 1fr; gap:10px 16px; align-content:center; }
+.camble-version-current dt { color:var(--muted); }
+.camble-version-current dd { margin:0; font-weight:700; }
+.camble-build-panel { display:grid; grid-template-columns:minmax(280px,1fr) minmax(300px,1.4fr) auto; gap:16px; align-items:end; }
+.camble-build-source { display:grid; gap:7px; color:var(--muted); }
+.camble-build-source code { color:var(--text); }
+.camble-selection-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+.camble-selection-actions button { min-height:34px; border:1px solid var(--border); border-radius:8px; padding:0 11px; background:var(--panel-strong); color:var(--text); cursor:pointer; }
+.camble-selection-actions button:hover { border-color:var(--accent); }
+.camble-service-selection .plugin-items label span { gap:5px; }
+.camble-service-selection .plugin-items label code { display:block; color:var(--muted); font-size:11px; }
+.camble-ref-status { width:max-content; padding:2px 7px; border-radius:999px; font-weight:800; }
+.camble-ref-status.current { color:var(--accent); background:color-mix(in srgb,var(--accent) 14%,transparent); }
+.camble-ref-status.stale { color:#ffb74d; background:rgba(255,183,77,.12); }
+.camble-ref-status.missing-source { color:#ff6b6b; background:rgba(255,107,107,.12); }
+.camble-artifacts { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+.camble-artifacts a { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--border); border-radius:8px; padding:7px 10px; color:var(--text); }
+.camble-artifacts svg { width:15px; height:15px; }
+
+@media (max-width: 900px) { .camble-release-grid, .camble-form-grid, .camble-version-grid, .camble-version-form, .camble-build-panel { grid-template-columns: 1fr; }.camble-form-grid .camble-actions { grid-column: 1; }.camble-inline-meta { grid-template-columns: auto minmax(0,1fr) !important; }.camble-actions { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }.camble-actions .plugin-action-button { min-width: 0; width: 100%; }.camble-release-workspace .plugin-items { grid-template-columns: repeat(2,minmax(0,1fr)); }.camble-collect-controls, .camble-deploy-controls { align-items: stretch; flex-direction: column; }.camble-collect-controls .camble-agent, .camble-deploy-controls .camble-agent { min-width: 0; } }
+@media (max-width: 560px) { .camble-release-section, .camble-tab-panel { padding: 12px 10px; }.camble-release-section > header { gap: 8px; }.camble-workspace-tabs { grid-template-columns:repeat(2,minmax(0,1fr)); padding:0 8px; }.camble-items, .camble-cluster-grid, .camble-actions, .camble-release-workspace .plugin-items { grid-template-columns: 1fr; }.camble-panel dl, .camble-cluster-card dl { grid-template-columns: 1fr; }.camble-panel dt, .camble-cluster-card dt { margin-top: 5px; }.camble-selection-heading, .camble-service-selection > header { align-items: stretch; flex-direction: column; }.camble-selection-heading button { width: 100%; }.camble-selection-actions { justify-content:flex-start; }.camble-selection-actions button { flex:1 1 145px; }.camble-operation-meta { flex-direction: column; gap: 4px; }.camble-release-workspace .plugin-environment-intro, .camble-release-workspace .plugin-deploy-bar { align-items: stretch; flex-direction: column; }.camble-tab-heading { gap:8px; }.camble-release-workspace .camble-release-history { margin: 0; } }

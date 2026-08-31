@@ -224,55 +224,76 @@ async function nextTag(runner, repo, item) {
   return max + 1;
 }
 
+function serviceCoordinates(environment, item) {
+  const repositoryId = item === "application3" ? "application3" : "backend";
+  const serviceName = item === "application3" ? "component" : item;
+  return {
+    repositoryId,
+    sourceBranch: environment === "preprod" ? "dev" : `tags/${serviceName}`,
+    targetBranch: environment === "preprod" ? `tags/${serviceName}` : `prod/${serviceName}`,
+  };
+}
+
 async function collect(request, deps) {
   const input = inputs(request);
   const environment = input.environment ?? "preprod";
   if (!new Set(["preprod", "prod"]).has(environment)) fail("Invalid environment");
   const app = repository(request, "application3");
   const backend = repository(request, "backend");
-  const branch = environment === "preprod" ? "dev" : "preprod";
-  const [applicationSha, backendSha] = await Promise.all([exactRef(deps.runner, app, branch), exactRef(deps.runner, backend, branch)]);
-  let items = ["application3", "backend"];
-  if (environment === "preprod") {
-    const root = path.join(workspace(request), "collect-backend");
-    await cloneExact(deps.runner, backend, backendSha, root);
-    const entries = await readdir(path.join(root, "services"), { withFileTypes: true });
-    items = ["application3", ...entries.filter((item) => item.isDirectory() && ITEM.test(item.name)).map((item) => item.name).sort()];
+  const [applicationDevSha, backendDevSha] = await Promise.all([exactRef(deps.runner, app, "dev"), exactRef(deps.runner, backend, "dev")]);
+  const root = path.join(workspace(request), "collect-backend");
+  await cloneExact(deps.runner, backend, backendDevSha, root);
+  const entries = await readdir(path.join(root, "services"), { withFileTypes: true });
+  const items = ["application3", ...entries.filter((item) => item.isDirectory() && ITEM.test(item.name)).map((item) => item.name).sort()];
+  const services = [];
+  for (const item of items) {
+    const coordinates = serviceCoordinates(environment, item);
+    const repo = coordinates.repositoryId === "application3" ? app : backend;
+    const sourceSha = environment === "preprod"
+      ? (coordinates.repositoryId === "application3" ? applicationDevSha : backendDevSha)
+      : await optionalRef(deps.runner, repo, `refs/heads/${coordinates.sourceBranch}`);
+    const targetSha = await optionalRef(deps.runner, repo, `refs/heads/${coordinates.targetBranch}`);
+    services.push({
+      id: item,
+      repository: coordinates.repositoryId,
+      sourceRef: coordinates.sourceBranch,
+      targetRef: coordinates.targetBranch,
+      sourceSha,
+      targetSha,
+      status: sourceSha === null ? "missing-source" : sourceSha === targetSha ? "current" : "stale",
+    });
   }
-  return ok(`Collected Camble ${environment} refs`, { environment, sourceBranch: branch, applicationSha, backendSha, items });
+  return ok(`Collected Camble ${environment} refs`, {
+    environment,
+    sourceBranch: environment === "preprod" ? "dev" : "tags/*",
+    applicationSha: applicationDevSha,
+    backendSha: backendDevSha,
+    items,
+    services,
+  });
 }
 
 export async function planPromotion(request, deps) {
   const input = inputs(request);
   const environment = input.environment ?? "preprod";
   if (!new Set(["preprod", "prod"]).has(environment)) fail("Invalid environment");
-  const app = repository(request, "application3");
-  const backend = repository(request, "backend");
-  const sourceBranch = environment === "preprod" ? "dev" : "preprod";
-  await Promise.all([
-    verifySource(deps.runner, app, sourceBranch, input.applicationSha),
-    verifySource(deps.runner, backend, sourceBranch, input.backendSha),
-  ]);
-  const updates = [];
-  if (environment === "prod") {
-    const [applicationOriginalSha, backendOriginalSha] = await Promise.all([
-      exactRef(deps.runner, app, "prod"),
-      exactRef(deps.runner, backend, "prod"),
-    ]);
-    updates.push({ repository: "application3", kind: "branch", ref: "refs/heads/prod", sha: input.applicationSha, originalSha: applicationOriginalSha });
-    updates.push({ repository: "backend", kind: "branch", ref: "refs/heads/prod", sha: input.backendSha, originalSha: backendOriginalSha });
-    return { environment, selectedItems: ["application3", "backend"], updates };
-  }
   if (!Array.isArray(input.items) || input.items.length === 0 || input.items.length > 100) fail("Select at least one item");
   const selectedItems = unique(input.items.map((item) => clean(item, "item")));
+  const updates = [];
   for (const item of selectedItems) {
-    if (item === "application3") updates.push({ repository: "application3", kind: "branch", ref: "refs/heads/preprod", sha: input.applicationSha });
-    else if (item === "component") updates.push({ repository: "backend", kind: "branch", ref: "refs/heads/preprod", sha: input.backendSha });
-    else {
-      const number = await nextTag(deps.runner, backend, item);
-      updates.push({ repository: "backend", kind: "tag", ref: `refs/tags/${item}-${number}`, sha: input.backendSha });
-      updates.push({ repository: "backend", kind: "branch", ref: `refs/heads/tags/${item}`, sha: input.backendSha });
-    }
+    const coordinates = serviceCoordinates(environment, item);
+    const repo = repository(request, coordinates.repositoryId);
+    const sourceSha = await exactRef(deps.runner, repo, coordinates.sourceBranch);
+    const originalSha = await optionalRef(deps.runner, repo, `refs/heads/${coordinates.targetBranch}`);
+    updates.push({
+      item,
+      repository: coordinates.repositoryId,
+      kind: "branch",
+      sourceRef: `refs/heads/${coordinates.sourceBranch}`,
+      ref: `refs/heads/${coordinates.targetBranch}`,
+      sha: sourceSha,
+      originalSha,
+    });
   }
   return { environment, selectedItems, updates };
 }
@@ -284,26 +305,13 @@ function promotionSteps(plan, dryRun) {
     originalSha: update.originalSha ?? null,
     targetSha: update.sha,
     applyStatus: dryRun ? "planned" : "pending",
-    rollback: update.originalSha ? { expectedSha: update.sha, targetSha: update.originalSha, status: dryRun ? "available" : "not-needed" } : null,
+    rollback: { expectedSha: update.sha, targetSha: update.originalSha, status: dryRun ? "available" : "not-needed" },
   }));
 }
-async function applyProdPromotion(request, deps, plan, output) {
-  const [firstUpdate, secondUpdate] = plan.updates;
-  const [firstStep, secondStep] = output.steps;
-  const apply = async (update, step) => {
-    if (update.originalSha === update.sha) {
-      step.applyStatus = "unchanged";
-      return;
-    }
-    try {
-      await pushRefWithLease(deps.runner, repository(request, update.repository), update.ref, update.sha, update.originalSha);
-      step.applyStatus = "succeeded";
-    } catch (error) {
-      step.applyStatus = error instanceof RefUpdateError && error.outcome === "lease-conflict" ? "lease-conflict" : "failed";
-      throw error;
-    }
-  };
-  const failure = (update, error) => ({
+async function applyPromotion(request, deps, plan, output) {
+  const applied = [];
+  const failureRecord = (update, error) => ({
+    item: update.item,
     repository: update.repository,
     ref: update.ref,
     expectedSha: update.originalSha,
@@ -311,68 +319,46 @@ async function applyProdPromotion(request, deps, plan, output) {
     outcome: error instanceof RefUpdateError ? error.outcome : "push-failed",
     ...(error instanceof RefUpdateError ? { actualSha: error.actualSha } : {}),
   });
-  try {
-    await apply(firstUpdate, firstStep);
-  } catch (error) {
-    output.failure = {
-      original: failure(firstUpdate, error),
-      rollback: { repository: firstUpdate.repository, ref: firstUpdate.ref, outcome: "not-needed" },
-    };
-    const conflict = output.failure.original.outcome === "lease-conflict" ? " due to a lease conflict" : "";
-    throw new PluginError(`Camble prod promotion failed on the first repository${conflict}; rollback was not needed`, output);
-  }
-  try {
-    await apply(secondUpdate, secondStep);
-  } catch (error) {
-    let rollback = { repository: firstUpdate.repository, ref: firstUpdate.ref, outcome: "not-needed" };
-    if (firstStep.applyStatus === "succeeded") {
-      firstStep.rollback.status = "pending";
-      try {
-        await pushRefWithLease(deps.runner, repository(request, firstUpdate.repository), firstUpdate.ref, firstUpdate.originalSha, firstUpdate.sha);
-        firstStep.rollback.status = "succeeded";
-        rollback = { repository: firstUpdate.repository, ref: firstUpdate.ref, expectedSha: firstUpdate.sha, targetSha: firstUpdate.originalSha, outcome: "restored" };
-      } catch (rollbackError) {
-        const outcome = rollbackError instanceof RefUpdateError ? rollbackError.outcome : "push-failed";
-        firstStep.rollback.status = outcome === "lease-conflict" ? "lease-conflict" : "failed";
-        rollback = {
-          repository: firstUpdate.repository,
-          ref: firstUpdate.ref,
-          expectedSha: firstUpdate.sha,
-          targetSha: firstUpdate.originalSha,
-          outcome: outcome === "lease-conflict" ? "lease-conflict" : "restore-failed",
-          ...(rollbackError instanceof RefUpdateError ? { actualSha: rollbackError.actualSha } : {}),
-        };
-      }
+  for (let index = 0; index < plan.updates.length; index += 1) {
+    const update = plan.updates[index];
+    const step = output.steps[index];
+    if (update.originalSha === update.sha) {
+      step.applyStatus = "unchanged";
+      continue;
     }
-    output.failure = {
-      original: failure(secondUpdate, error),
-      rollback,
-    };
-    const suffix = rollback.outcome === "restored" ? "the first repository was restored"
-      : rollback.outcome === "not-needed" ? "rollback was not needed"
-        : rollback.outcome === "lease-conflict" ? "rollback was blocked by a lease conflict"
-          : "restoring the first repository also failed";
-    throw new PluginError(`Camble prod promotion failed on the second repository; ${suffix}`, output);
+    try {
+      await pushRefWithLease(deps.runner, repository(request, update.repository), update.ref, update.sha, update.originalSha);
+      step.applyStatus = "succeeded";
+      applied.push({ update, step });
+    } catch (error) {
+      step.applyStatus = error instanceof RefUpdateError && error.outcome === "lease-conflict" ? "lease-conflict" : "failed";
+      const rollback = [];
+      for (const previous of [...applied].reverse()) {
+        previous.step.rollback.status = "pending";
+        try {
+          if (previous.update.originalSha === null) {
+            await pushRefWithLease(deps.runner, repository(request, previous.update.repository), previous.update.ref, "0".repeat(40), previous.update.sha);
+          } else {
+            await pushRefWithLease(deps.runner, repository(request, previous.update.repository), previous.update.ref, previous.update.originalSha, previous.update.sha);
+          }
+          previous.step.rollback.status = "succeeded";
+          rollback.push({ item: previous.update.item, repository: previous.update.repository, ref: previous.update.ref, outcome: "restored" });
+        } catch (rollbackError) {
+          const outcome = rollbackError instanceof RefUpdateError && rollbackError.outcome === "lease-conflict" ? "lease-conflict" : "restore-failed";
+          previous.step.rollback.status = outcome;
+          rollback.push({ item: previous.update.item, repository: previous.update.repository, ref: previous.update.ref, outcome });
+        }
+      }
+      output.failure = { original: failureRecord(update, error), rollback };
+      throw new PluginError(`Camble ${plan.environment} promotion failed for ${update.item}`, output);
+    }
   }
 }
 async function promote(request, deps) {
   const dryRun = boolean(inputs(request).dryRun, true);
   const plan = await planPromotion(request, deps);
   const output = { ...plan, dryRun, steps: promotionSteps(plan, dryRun) };
-  if (!dryRun && plan.environment === "prod") await applyProdPromotion(request, deps, plan, output);
-  else if (!dryRun) {
-    for (let index = 0; index < plan.updates.length; index += 1) {
-      const update = plan.updates[index];
-      try {
-        await pushRef(deps.runner, repository(request, update.repository), update.ref, update.sha, update.kind === "branch");
-        output.steps[index].applyStatus = "succeeded";
-      } catch {
-        output.steps[index].applyStatus = "failed";
-        output.failure = { original: { repository: update.repository, ref: update.ref, outcome: "push-failed" }, rollback: { outcome: "not-available" } };
-        throw new PluginError("Camble preprod promotion failed", output);
-      }
-    }
-  }
+  if (!dryRun) await applyPromotion(request, deps, plan, output);
   return ok(`${dryRun ? "Planned" : "Applied"} Camble ${plan.environment} promotion`, output);
 }
 
@@ -389,7 +375,8 @@ async function github(request, deps, repo, endpoint, options = {}) {
 }
 function appVersion(decoded, label) {
   const versionName = decoded?.expo?.version;
-  const buildNumber = decoded?.expo?.android?.versionCode;
+  const rawBuildNumber = decoded?.expo?.android?.versionCode;
+  const buildNumber = typeof rawBuildNumber === "string" && /^\d{1,9}$/.test(rawBuildNumber) ? Number(rawBuildNumber) : rawBuildNumber;
   const iosBuildNumber = decoded?.expo?.ios?.buildNumber;
   if (typeof versionName !== "string" || !VERSION.test(versionName) || !Number.isSafeInteger(buildNumber) || buildNumber < 1) fail(`Invalid ${label} version`);
   if (typeof iosBuildNumber !== "string" || iosBuildNumber !== String(buildNumber)) fail(`${label} iOS buildNumber must equal Android versionCode`);
@@ -431,22 +418,20 @@ async function androidBuild(request, deps) {
   const input = inputs(request);
   const dryRun = boolean(input.dryRun, true);
   if (input.track !== undefined && input.track !== PLAY_TRACK) fail("Google Play track is fixed to internal");
-  clean(input.applicationSha, "application SHA", SHA); clean(input.backendSha, "backend SHA", SHA);
   const app = repository(request, "application3");
   const backend = repository(request, "backend");
-  await Promise.all([
-    verifySource(deps.runner, app, "preprod", input.applicationSha),
-    verifySource(deps.runner, backend, "preprod", input.backendSha),
-  ]);
+  const [applicationSha, backendSha] = await Promise.all([exactRef(deps.runner, app, "dev"), exactRef(deps.runner, backend, "dev")]);
+  if (input.applicationSha !== undefined && input.applicationSha !== applicationSha) fail("application3:dev moved; refresh build data");
+  if (input.backendSha !== undefined && input.backendSha !== backendSha) fail("backend:dev moved; refresh build data");
   const root = workspace(request);
   const applicationRoot = path.join(root, "application");
   const backendRoot = path.join(root, "backend");
-  if (dryRun) return ok("Planned verified-preprod Camble Android build", { dryRun, applicationSha: input.applicationSha, backendSha: input.backendSha, verifiedBranch: "preprod", storeTrack: PLAY_TRACK, steps: ["verify current preprod SHAs", "clone exact SHAs", "npm ci/preinit", "signed APK+AAB", "optional Google Play Internal upload"] });
-  await cloneExact(deps.runner, app, input.applicationSha, applicationRoot);
-  await cloneExact(deps.runner, backend, input.backendSha, backendRoot);
+  if (dryRun) return ok("Planned application3 dev build", { dryRun, applicationSha, backendSha, verifiedBranch: "dev", storeTrack: PLAY_TRACK, steps: ["resolve current dev SHAs", "clone exact SHAs", "npm ci/preinit", "signed APK+AAB", "optional Google Play Internal upload"] });
+  await cloneExact(deps.runner, app, applicationSha, applicationRoot);
+  await cloneExact(deps.runner, backend, backendSha, backendRoot);
   await deps.runner("npm", ["ci", "--no-audit", "--no-fund"], { cwd: applicationRoot });
   await deps.runner("npm", ["install", "--no-package-lock", "--no-audit", "--no-fund"], { cwd: path.join(applicationRoot, "builder") });
-  await deps.runner("npm", ["run", "preinit"], { cwd: applicationRoot, env: { BACKEND_DIR: backendRoot, BACKEND_BRANCH: input.backendSha } });
+  await deps.runner("npm", ["run", "preinit"], { cwd: applicationRoot, env: { BACKEND_DIR: backendRoot, BACKEND_BRANCH: backendSha } });
   const appJson = JSON.parse(await readFile(path.join(applicationRoot, "app.json"), "utf8"));
   const { versionName, buildNumber } = appVersion(appJson, "Generated Camble app.json");
   const keystore = Buffer.from(secret(request, deps, "ANDROID_UPLOAD_KEYSTORE_BASE64"), "base64");
@@ -479,7 +464,7 @@ async function androidBuild(request, deps) {
     { path: path.relative(root, apk), type: "apk", versionName, buildNumber: String(buildNumber) },
     { path: path.relative(root, aab), type: "aab", versionName, buildNumber: String(buildNumber) },
   ];
-  return ok(`Built signed Camble Android ${versionName} (${buildNumber})`, { dryRun, applicationSha: input.applicationSha, backendSha: input.backendSha, verifiedBranch: "preprod", versionName, buildNumber: String(buildNumber), storeTrack: PLAY_TRACK, storeStatus }, artifacts);
+  return ok(`Built signed Camble Android ${versionName} (${buildNumber})`, { dryRun, applicationSha, backendSha, verifiedBranch: "dev", versionName, buildNumber: String(buildNumber), storeTrack: PLAY_TRACK, storeStatus }, artifacts);
 }
 
 async function clusterPlan(request, deps) {

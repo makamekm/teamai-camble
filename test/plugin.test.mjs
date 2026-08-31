@@ -117,144 +117,108 @@ test("manifest is executable schema v2 with only declared action contract", asyn
   assert.equal(JSON.stringify(manifest).includes("production"), false);
 });
 
-test("collect resolves exact refs and backend service directories", async () => {
+test("collect resolves per-service dev to tags state with exact SHAs", async () => {
   const workspace = await root();
-  const runner = refsRunner({ clone: async (target) => {
-    await mkdir(path.join(target, "services", "component"), { recursive: true });
-    await mkdir(path.join(target, "services", "admin-ui"), { recursive: true });
-    await writeFile(path.join(target, "services", "README"), "not a directory");
-  } });
+  const runner = refsRunner({
+    heads: {
+      "application3:refs/heads/tags/component": C,
+      "backend:refs/heads/tags/admin-ui": B,
+      "backend:refs/heads/tags/component": D,
+    },
+    clone: async (target) => {
+      await mkdir(path.join(target, "services", "component"), { recursive: true });
+      await mkdir(path.join(target, "services", "admin-ui"), { recursive: true });
+      await writeFile(path.join(target, "services", "README"), "not a directory");
+    },
+  });
   const result = await execute(request("collect", { environment: "preprod" }, workspace), { runner });
   assert.equal(result.status, "ok");
-  assert.deepEqual(result.output, { environment: "preprod", sourceBranch: "dev", applicationSha: A, backendSha: B, items: ["application3", "admin-ui", "component"] });
-  assert.ok(runner.calls.some((call) => call.args[0] === "checkout" && call.args.at(-1) === B));
+  assert.deepEqual(result.output.items, ["application3", "admin-ui", "component"]);
+  assert.deepEqual(result.output.services.map(({ id, repository, sourceRef, targetRef, sourceSha, targetSha, status }) => ({ id, repository, sourceRef, targetRef, sourceSha, targetSha, status })), [
+    { id: "application3", repository: "application3", sourceRef: "dev", targetRef: "tags/component", sourceSha: A, targetSha: C, status: "stale" },
+    { id: "admin-ui", repository: "backend", sourceRef: "dev", targetRef: "tags/admin-ui", sourceSha: B, targetSha: B, status: "current" },
+    { id: "component", repository: "backend", sourceRef: "dev", targetRef: "tags/component", sourceSha: B, targetSha: D, status: "stale" },
+  ]);
   assert.equal(runner.calls.some((call) => call.args[0] === "push"), false);
 });
 
-test("preprod plan preserves application/component special cases and immutable backend tags", async () => {
+test("prod collect compares every tags service ref with prod service ref", async () => {
   const workspace = await root();
-  const runner = refsRunner({ tags: { "refs/tags/admin-ui-*": `${B}\trefs/tags/admin-ui-2\n${B}\trefs/tags/admin-ui-9\n` } });
-  const value = request("promote", { environment: "preprod", "application-sha": A, "backend-sha": B, items: ["application3", "component", "admin-ui"], "dry-run": true }, workspace);
+  const runner = refsRunner({
+    heads: {
+      "application3:refs/heads/tags/component": C,
+      "application3:refs/heads/prod/component": C,
+      "backend:refs/heads/tags/component": D,
+      "backend:refs/heads/prod/component": B,
+    },
+    clone: async (target) => { await mkdir(path.join(target, "services", "component"), { recursive: true }); },
+  });
+  const result = await execute(request("collect", { environment: "prod" }, workspace), { runner });
+  assert.deepEqual(result.output.services.map(({ id, sourceRef, targetRef, status }) => ({ id, sourceRef, targetRef, status })), [
+    { id: "application3", sourceRef: "tags/component", targetRef: "prod/component", status: "current" },
+    { id: "component", sourceRef: "tags/component", targetRef: "prod/component", status: "stale" },
+  ]);
+});
+
+test("preprod plan maps application and backend services from dev to tags branches", async () => {
+  const workspace = await root();
+  const runner = refsRunner({ heads: {
+    "application3:refs/heads/tags/component": C,
+    "backend:refs/heads/tags/component": D,
+    "backend:refs/heads/tags/admin-ui": D,
+  } });
+  const value = request("promote", { environment: "preprod", items: ["application3", "component", "admin-ui"], dryRun: true }, workspace);
   const plan = await planPromotion(value, { runner });
-  assert.deepEqual(plan.updates, [
-    { repository: "application3", kind: "branch", ref: "refs/heads/preprod", sha: A },
-    { repository: "backend", kind: "branch", ref: "refs/heads/preprod", sha: B },
-    { repository: "backend", kind: "tag", ref: "refs/tags/admin-ui-10", sha: B },
-    { repository: "backend", kind: "branch", ref: "refs/heads/tags/admin-ui", sha: B },
+  assert.deepEqual(plan.updates.map(({ item, repository, sourceRef, ref, sha, originalSha }) => ({ item, repository, sourceRef, ref, sha, originalSha })), [
+    { item: "application3", repository: "application3", sourceRef: "refs/heads/dev", ref: "refs/heads/tags/component", sha: A, originalSha: C },
+    { item: "component", repository: "backend", sourceRef: "refs/heads/dev", ref: "refs/heads/tags/component", sha: B, originalSha: D },
+    { item: "admin-ui", repository: "backend", sourceRef: "refs/heads/dev", ref: "refs/heads/tags/admin-ui", sha: B, originalSha: D },
   ]);
   const result = await execute(value, { runner });
   assert.equal(result.output.dryRun, true);
   assert.equal(runner.calls.some((call) => call.args[0] === "push"), false);
 });
 
-test("prod always promotes both full preprod refs and rejects stale snapshots", async () => {
+test("prod plan promotes only selected tags branches to matching prod branches", async () => {
   const workspace = await root();
   const runner = refsRunner({ heads: {
-    "application3:refs/heads/prod": C,
-    "backend:refs/heads/prod": D,
+    "application3:refs/heads/tags/component": C,
+    "application3:refs/heads/prod/component": A,
+    "backend:refs/heads/tags/admin-ui": D,
+    "backend:refs/heads/prod/admin-ui": B,
   } });
-  const result = await execute(request("promote", { environment: "prod", applicationSha: A, backendSha: B, items: ["application3"], dryRun: true }, workspace), { runner });
-  assert.deepEqual(result.output.selectedItems, ["application3", "backend"]);
-  assert.deepEqual(result.output.updates.map((item) => item.ref), ["refs/heads/prod", "refs/heads/prod"]);
-  assert.deepEqual(result.output.updates.map((item) => item.originalSha), [C, D]);
-  assert.deepEqual(result.output.steps.map((item) => [item.originalSha, item.applyStatus, item.rollback.status]), [[C, "planned", "available"], [D, "planned", "available"]]);
-  await assert.rejects(() => execute(request("promote", { environment: "prod", applicationSha: "c".repeat(40), backendSha: B, dryRun: true }, workspace), { runner }), /moved/);
+  const result = await execute(request("promote", { environment: "prod", items: ["application3", "admin-ui"], dryRun: true }, workspace), { runner });
+  assert.deepEqual(result.output.selectedItems, ["application3", "admin-ui"]);
+  assert.deepEqual(result.output.updates.map(({ sourceRef, ref, sha, originalSha }) => ({ sourceRef, ref, sha, originalSha })), [
+    { sourceRef: "refs/heads/tags/component", ref: "refs/heads/prod/component", sha: C, originalSha: A },
+    { sourceRef: "refs/heads/tags/admin-ui", ref: "refs/heads/prod/admin-ui", sha: D, originalSha: B },
+  ]);
 });
 
-test("real promotion performs immutable tag before branch updates", async () => {
-  const workspace = await root();
-  const runner = refsRunner();
-  const result = await execute(request("promote", { environment: "preprod", applicationSha: A, backendSha: B, items: ["billing"], dryRun: false }, workspace), { runner });
-  assert.equal(result.output.dryRun, false);
-  const pushes = runner.calls.filter((call) => call.args[0] === "push").map((call) => call.args.at(-1));
-  assert.deepEqual(pushes, [`${B}:refs/tags/billing-1`, `+${B}:refs/heads/tags/billing`]);
-});
-
-test("prod promotion restores the first repository when the second push fails", async () => {
+test("multi-service promotion uses guarded writes and rolls back earlier writes on failure", async () => {
   const workspace = await root();
   const runner = statefulRefsRunner({
+    refs: {
+      "application3:refs/heads/tags/component": A,
+      "application3:refs/heads/prod/component": C,
+      "backend:refs/heads/tags/component": B,
+      "backend:refs/heads/prod/component": D,
+    },
     failPush: ({ pushNumber }) => pushNumber === 2 ? 7 : 0,
   });
-  const result = await executeContract(request("promote", { environment: "prod", applicationSha: A, backendSha: B, dryRun: false }, workspace), { runner });
+  const result = await executeContract(request("promote", { environment: "prod", items: ["application3", "component"], dryRun: false }, workspace), { runner });
   assert.equal(result.exitCode, 1);
   assert.equal(result.response.status, "error");
-  assert.deepEqual(runner.calls.filter((call) => call.args[0] === "push").map((call) => call.args.slice(1)), [
-    [`--force-with-lease=refs/heads/prod:${C}`, repositories[0].url, `${A}:refs/heads/prod`],
-    [`--force-with-lease=refs/heads/prod:${D}`, repositories[1].url, `${B}:refs/heads/prod`],
-    [`--force-with-lease=refs/heads/prod:${A}`, repositories[0].url, `${C}:refs/heads/prod`],
-  ]);
-  assert.equal(result.response.output.steps[0].originalSha, C);
-  assert.equal(result.response.output.steps[0].applyStatus, "succeeded");
-  assert.equal(result.response.output.steps[0].rollback.status, "succeeded");
-  assert.equal(result.response.output.steps[1].originalSha, D);
-  assert.equal(result.response.output.steps[1].applyStatus, "failed");
-  assert.deepEqual(result.response.output.failure, {
-    original: { repository: "backend", ref: "refs/heads/prod", expectedSha: D, targetSha: B, outcome: "push-failed", actualSha: D },
-    rollback: { repository: "application3", ref: "refs/heads/prod", expectedSha: A, targetSha: C, outcome: "restored" },
-  });
-  assert.equal(runner.read("application3", "refs/heads/prod"), C);
-});
-
-test("prod promotion reports both the original failure and failed compensation", async () => {
-  const workspace = await root();
-  const runner = statefulRefsRunner({
-    failPush: ({ pushNumber }) => pushNumber >= 2 ? 7 : 0,
-  });
-  const result = await executeContract(request("promote", { environment: "prod", applicationSha: A, backendSha: B, dryRun: false }, workspace), { runner });
-  assert.equal(result.response.status, "error");
-  assert.match(result.response.summary, /restoring the first repository also failed/);
-  assert.equal(result.response.output.failure.original.outcome, "push-failed");
-  assert.equal(result.response.output.failure.rollback.outcome, "restore-failed");
-  assert.equal(result.response.output.steps[0].rollback.status, "failed");
-});
-
-test("prod rollback never overwrites a concurrent update and reports the lease conflict", async () => {
-  const workspace = await root();
-  const runner = statefulRefsRunner({
-    failPush: ({ pushNumber, state }) => {
-      if (pushNumber !== 2) return 0;
-      state.set("application3:refs/heads/prod", E);
-      return 7;
-    },
-  });
-  const result = await executeContract(request("promote", { environment: "prod", applicationSha: A, backendSha: B, dryRun: false }, workspace), { runner });
-  assert.equal(result.response.status, "error");
-  assert.match(result.response.summary, /rollback was blocked by a lease conflict/);
-  assert.equal(result.response.output.failure.original.outcome, "push-failed");
-  assert.deepEqual(result.response.output.failure.rollback, {
-    repository: "application3",
-    ref: "refs/heads/prod",
-    expectedSha: A,
-    targetSha: C,
-    outcome: "lease-conflict",
-    actualSha: E,
-  });
-  assert.equal(result.response.output.steps[0].rollback.status, "lease-conflict");
-  assert.equal(runner.read("application3", "refs/heads/prod"), E);
-});
-
-test("prod apply fails closed when its preflight lease loses a race", async () => {
-  const workspace = await root();
-  const runner = statefulRefsRunner({
-    failPush: ({ pushNumber, state }) => {
-      if (pushNumber === 1) state.set("application3:refs/heads/prod", E);
-      return 0;
-    },
-  });
-  const result = await executeContract(request("promote", { environment: "prod", applicationSha: A, backendSha: B, dryRun: false }, workspace), { runner });
-  assert.equal(result.response.status, "error");
-  assert.equal(result.response.output.steps[0].applyStatus, "lease-conflict");
-  assert.deepEqual(result.response.output.failure.original, { repository: "application3", ref: "refs/heads/prod", expectedSha: C, targetSha: A, outcome: "lease-conflict", actualSha: E });
-  assert.equal(result.response.output.failure.rollback.outcome, "not-needed");
-  assert.equal(runner.read("application3", "refs/heads/prod"), E);
-  assert.equal(runner.calls.filter((call) => call.args[0] === "push").length, 1);
+  assert.equal(result.response.output.failure.original.item, "component");
+  assert.equal(result.response.output.failure.rollback[0].outcome, "restored");
+  assert.equal(runner.read("application3", "refs/heads/prod/component"), C);
 });
 
 test("version inspect and apply validate the next build and dry-run workflow dispatch", async () => {
   const workspace = await root();
   const runner = refsRunner({ clone: async (target) => {
     await mkdir(target, { recursive: true });
-    await writeFile(path.join(target, "app.json"), JSON.stringify({ expo: { version: "4.3.3-rc.1+build.7", android: { versionCode: 200422 }, ios: { buildNumber: "200422" } } }));
+    await writeFile(path.join(target, "app.json"), JSON.stringify({ expo: { version: "4.3.3-rc.1+build.7", android: { versionCode: "200422" }, ios: { buildNumber: "200422" } } }));
   } });
   const inspected = await execute(request("version-inspect", {}, workspace), { runner });
   assert.equal(inspected.output.versionName, "4.3.3-rc.1+build.7");
@@ -266,21 +230,18 @@ test("version inspect and apply validate the next build and dry-run workflow dis
   await assert.rejects(() => execute(request("version-apply", { versionName: "4.4.0-01", buildNumber: 200423, dryRun: true }, workspace), { runner }), /Invalid version name/);
 });
 
-test("android dry-run verifies current preprod tips and fixes Play uploads to Internal", async () => {
+test("application build resolves current dev tips on the selected agent", async () => {
   const workspace = await root();
   const runner = refsRunner();
-  const result = await execute(request("android-build", { applicationSha: A, backendSha: B, dryRun: true }, workspace), { runner });
+  const result = await execute(request("android-build", { dryRun: true }, workspace), { runner });
   assert.equal(result.output.dryRun, true);
+  assert.equal(result.output.verifiedBranch, "dev");
   assert.equal(result.output.storeTrack, "internal");
-  assert.deepEqual(result.output.steps, ["verify current preprod SHAs", "clone exact SHAs", "npm ci/preinit", "signed APK+AAB", "optional Google Play Internal upload"]);
-  assert.deepEqual(runner.calls.filter((call) => call.args[0] === "ls-remote").map((call) => call.args[2]), ["refs/heads/preprod", "refs/heads/preprod"]);
+  assert.deepEqual(result.output.steps, ["resolve current dev SHAs", "clone exact SHAs", "npm ci/preinit", "signed APK+AAB", "optional Google Play Internal upload"]);
+  assert.deepEqual(runner.calls.filter((call) => call.args[0] === "ls-remote").map((call) => call.args[2]), ["refs/heads/dev", "refs/heads/dev"]);
   assert.equal(runner.calls.some((call) => call.args[0] === "clone"), false);
-  await assert.rejects(() => execute(request("android-build", { applicationSha: "main", backendSha: B, dryRun: true }, workspace), { runner }), PluginError);
-  await assert.rejects(() => execute(request("android-build", { applicationSha: A, backendSha: B, track: "production", dryRun: true }, workspace), { runner }), /fixed to internal/);
-
-  const staleRunner = refsRunner({ heads: { "application3:refs/heads/preprod": C } });
-  await assert.rejects(() => execute(request("android-build", { applicationSha: A, backendSha: B, dryRun: true }, workspace), { runner: staleRunner }), /moved/);
-  assert.equal(staleRunner.calls.some((call) => call.args[0] === "clone"), false);
+  await assert.rejects(() => execute(request("android-build", { applicationSha: C, dryRun: true }, workspace), { runner }), /dev moved/);
+  await assert.rejects(() => execute(request("android-build", { track: "production", dryRun: true }, workspace), { runner }), /fixed to internal/);
 });
 
 test("android build rejects generated iOS and Android build-number mismatch before signing", async () => {

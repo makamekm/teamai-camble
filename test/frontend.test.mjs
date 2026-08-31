@@ -23,25 +23,26 @@ test("React mini-frontend declares and registers the versioned TeamAI host contr
   assert.match(entry, /root\.unmount\(\)/);
 });
 
-test("Camble mini-frontend restores the original Preprod/Prod release workspace", () => {
+test("Camble mini-frontend exposes version, build, Preprod and Prod workflows", () => {
   const component = source("src/camble-release-console.tsx");
   const css = source("src/camble-release-console.css");
   for (const label of [
-    "Preprod", "Prod", "Собрать данные", "Выберите сервисы",
-    "Полный состав окружения", "TeamAI обновит только отмеченные refs.",
-    "Развернуть", "История и прогресс", "Данные ещё не собраны",
-  ]) assert.ok(component.includes(label), `missing original Camble label: ${label}`);
-  for (const removed of ["Проверить версию", "Собрать Android", "Состояние кластера", "Source branch", "Маппинг сервисов"]) {
-    assert.ok(!component.includes(removed), `non-original workspace leaked into UI: ${removed}`);
-  }
-  assert.match(component, /const REQUIRED_ACTIONS = \["collect", "promote"\]/);
-  assert.match(component, /role="tablist" aria-label="Camble release environment"/);
-  assert.match(component, /snapshot\.items\)\.map/);
-  assert.match(component, /latestCollectSnapshot/);
+    "Версионирование", "Билд", "Preprod", "Prod", "Обновить из application3/dev",
+    "Проставить версию и билд", "Свободный агент", "Собрать application",
+    "dev → tags/[service]", "tags/[service] → prod/[service]", "Выберите сервисы",
+    "Выделить все", "Сбросить выделение", "Отстал от dev", "Отстал от Preprod",
+    "Актуальный", "Развернуть выбранные", "История и прогресс",
+  ]) assert.ok(component.includes(label), `missing Camble workflow label: ${label}`);
+  assert.match(component, /const REQUIRED_ACTIONS = \["version-inspect", "version-apply", "android-build", "collect", "promote"\]/);
+  assert.match(component, /role="tablist" aria-label="Camble release workspace"/);
+  assert.match(component, /useEffect\(\(\) => \{ setSelectedItems\(\[\]\); \}, \[tab, collectOperation\?\.id\]\)/);
+  assert.match(component, /setSelectedItems\(availableServices\.map/);
+  assert.match(component, /sourceRef: text\(item\.sourceRef\)/);
+  assert.match(component, /targetRef: text\(item\.targetRef\)/);
   assert.match(component, /operation\.progress\.map/);
-  assert.match(component, /REQUIRED_ACTIONS\.filter/);
   assert.match(css, /\.plugin-action-button\s*\{[^}]*border:\s*1px solid/);
-  assert.match(css, /\.camble-original-release/);
+  assert.match(css, /\.camble-workspace-tabs/);
+  assert.match(css, /\.camble-ref-status\.stale/);
   assert.match(css, /@media \(max-width: 560px\)/);
 });
 

@@ -14,7 +14,7 @@
     {
       "id": "collect",
       "label": "Collect release refs",
-      "description": "Resolve exact application/backend SHAs and available Camble services.",
+      "description": "Resolve exact source/target refs, per-service SHAs and stale/current state for Preprod or Prod.",
       "mode": "read",
       "capabilities": ["git", "node"],
       "inputs": [
@@ -24,15 +24,13 @@
     {
       "id": "promote",
       "label": "Promote refs",
-      "description": "Promote a collected exact-SHA snapshot to Preprod or Prod.",
+      "description": "Promote selected services from dev to tags/* or from tags/* to prod/* with guarded ref updates.",
       "mode": "write",
       "confirm": "Apply the exact Camble ref promotion plan?",
       "capabilities": ["git", "node"],
       "inputs": [
         { "id": "environment", "label": "Environment", "type": "enum", "required": true, "default": "preprod", "options": [{ "value": "preprod", "label": "Preprod" }, { "value": "prod", "label": "Prod" }] },
-        { "id": "application-sha", "label": "application3 SHA", "type": "string", "required": true },
-        { "id": "backend-sha", "label": "backend SHA", "type": "string", "required": true },
-        { "id": "items", "label": "Items", "type": "multiselect", "required": false },
+        { "id": "items", "label": "Services", "type": "multiselect", "required": true },
         { "id": "dry-run", "label": "Dry run", "type": "boolean", "required": true, "default": true }
       ]
     },
@@ -59,14 +57,12 @@
     },
     {
       "id": "android-build",
-      "label": "Build Android",
-      "description": "Verify current application/backend preprod SHAs, build signed APK and AAB, and optionally upload to Google Play Internal.",
+      "label": "Build application",
+      "description": "Resolve current application3/backend dev SHAs on the selected or next free compatible agent and build signed APK/AAB artifacts.",
       "mode": "write",
-      "confirm": "Build signed Camble Android artifacts from the current Preprod refs and upload to Google Play Internal when credentials are supplied?",
+      "confirm": "Build signed Camble Android artifacts from the current application3/backend dev refs on this agent?",
       "capabilities": ["git", "node", "npm", "java", "android"],
       "inputs": [
-        { "id": "application-sha", "label": "application3 SHA", "type": "string", "required": true },
-        { "id": "backend-sha", "label": "backend SHA", "type": "string", "required": true },
         { "id": "dry-run", "label": "Dry run", "type": "boolean", "required": true, "default": true }
       ]
     },
