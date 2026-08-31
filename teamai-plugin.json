@@ -5,6 +5,7 @@
   "description": "Executable Camble release, Android and Kubernetes operations.",
   "refreshMinutes": 60,
   "runtime": { "apiVersion": 1, "engine": "node", "entrypoint": "plugin.mjs" },
+  "frontend": { "apiVersion": 1, "engine": "react", "entrypoint": "dist/frontend.js", "stylesheet": "dist/frontend.css" },
   "repositories": [
     { "id": "application3", "label": "Camble application", "owner": "ruletvorg", "name": "application3" },
     { "id": "backend", "label": "Camble backend", "owner": "ruletvorg", "name": "backend" }
