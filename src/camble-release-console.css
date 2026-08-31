@@ -155,7 +155,8 @@
 .camble-cluster-deploy fieldset { min-width: 0; padding: 0; border: 0; }.camble-cluster-deploy legend { margin-bottom: 7px; color: var(--muted); font-size: 9px; }
 .camble-operation-meta { padding: 8px 12px; display: flex; gap: 16px; color: var(--muted); font-size: 9px; border-bottom: 1px solid var(--line-soft); }
 .camble-history .plugin-result h4 { margin: 12px 0 6px; color: var(--muted); font-size: 9px; text-transform: uppercase; }
-.camble-release-workspace { display:grid; gap:0; border:1px solid var(--border); border-radius:0 0 16px 16px; overflow:hidden; background:var(--panel); }
+.camble-release-workspace { display:grid; gap:0; min-width:0; border:1px solid var(--border); border-radius:0 0 16px 16px; overflow:hidden; background:var(--panel); }
+.camble-release-workspace p, .camble-release-workspace small { white-space:normal; overflow-wrap:anywhere; }
 .camble-release-workspace .camble-workspace-tabs { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); }
 .camble-tab-panel { display:grid; gap:18px; padding:20px; }
 .camble-tab-heading { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; }
