@@ -7,7 +7,7 @@
     "build": "vite build",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test test/*.test.mjs",
-    "check": "npm run test && npm run typecheck && npm run build"
+    "check": "npm run typecheck && npm run build && npm run test"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

@@ -60,5 +60,6 @@ test("production bundle contains the registered mini-frontend and stylesheet", (
   assert.ok(Buffer.byteLength(style) < 512 * 1024);
   assert.match(script, /camble-release/);
   assert.match(script, /TeamAIPluginHost/);
+  assert.doesNotMatch(script, /process\.env\.NODE_ENV/, "browser bundle must not depend on Node.js process globals");
   assert.match(style, /camble-release-console/);
 });
