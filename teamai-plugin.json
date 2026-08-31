@@ -29,10 +29,10 @@
       "capabilities": ["git", "node"],
       "inputs": [
         { "id": "environment", "label": "Environment", "type": "enum", "required": true, "default": "preprod", "options": [{ "value": "preprod", "label": "Preprod" }, { "value": "prod", "label": "Prod" }] },
-        { "id": "applicationSha", "label": "application3 SHA", "type": "string", "required": true },
-        { "id": "backendSha", "label": "backend SHA", "type": "string", "required": true },
+        { "id": "application-sha", "label": "application3 SHA", "type": "string", "required": true },
+        { "id": "backend-sha", "label": "backend SHA", "type": "string", "required": true },
         { "id": "items", "label": "Items", "type": "multiselect", "required": false },
-        { "id": "dryRun", "label": "Dry run", "type": "boolean", "required": true, "default": true }
+        { "id": "dry-run", "label": "Dry run", "type": "boolean", "required": true, "default": true }
       ]
     },
     {
@@ -51,9 +51,9 @@
       "confirm": "Dispatch the Camble version workflow with these exact values?",
       "capabilities": ["git", "node"],
       "inputs": [
-        { "id": "versionName", "label": "Version", "type": "string", "required": true },
-        { "id": "buildNumber", "label": "Build number", "type": "integer", "required": true },
-        { "id": "dryRun", "label": "Dry run", "type": "boolean", "required": true, "default": true }
+        { "id": "version-name", "label": "Version", "type": "string", "required": true },
+        { "id": "build-number", "label": "Build number", "type": "integer", "required": true },
+        { "id": "dry-run", "label": "Dry run", "type": "boolean", "required": true, "default": true }
       ]
     },
     {
@@ -64,9 +64,9 @@
       "confirm": "Build signed Camble Android artifacts from the current Preprod refs and upload to Google Play Internal when credentials are supplied?",
       "capabilities": ["git", "node", "npm", "java", "android"],
       "inputs": [
-        { "id": "applicationSha", "label": "application3 SHA", "type": "string", "required": true },
-        { "id": "backendSha", "label": "backend SHA", "type": "string", "required": true },
-        { "id": "dryRun", "label": "Dry run", "type": "boolean", "required": true, "default": true }
+        { "id": "application-sha", "label": "application3 SHA", "type": "string", "required": true },
+        { "id": "backend-sha", "label": "backend SHA", "type": "string", "required": true },
+        { "id": "dry-run", "label": "Dry run", "type": "boolean", "required": true, "default": true }
       ]
     },
     {
@@ -85,9 +85,9 @@
       "confirm": "Create immutable full-SHA Camble provenance tags, lease-update deployment branches and verify exact rollout digests?",
       "capabilities": ["git", "node", "kubectl"],
       "inputs": [
-        { "id": "sourceBranch", "label": "Source branch", "type": "string", "required": true, "default": "dev" },
+        { "id": "source-branch", "label": "Source branch", "type": "string", "required": true, "default": "dev" },
         { "id": "services", "label": "Services", "type": "multiselect", "required": true, "options": [{ "value": "application3", "label": "application3" }, { "value": "admin-ui", "label": "admin-ui" }, { "value": "component", "label": "component" }] },
-        { "id": "dryRun", "label": "Dry run", "type": "boolean", "required": true, "default": true }
+        { "id": "dry-run", "label": "Dry run", "type": "boolean", "required": true, "default": true }
       ]
     }
   ]

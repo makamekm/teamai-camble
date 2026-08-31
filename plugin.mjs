@@ -110,7 +110,22 @@ function actionId(request) {
 function inputs(request) {
   const value = request.input ?? request.inputs ?? {};
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("Invalid input object");
-  return value;
+  const aliases = {
+    applicationSha: "application-sha",
+    backendSha: "backend-sha",
+    dryRun: "dry-run",
+    versionName: "version-name",
+    buildNumber: "build-number",
+    sourceBranch: "source-branch",
+  };
+  return new Proxy(value, {
+    get(target, property, receiver) {
+      const direct = Reflect.get(target, property, receiver);
+      return direct !== undefined || typeof property !== "string" || !aliases[property]
+        ? direct
+        : target[aliases[property]];
+    },
+  });
 }
 function repository(request, id) {
   const found = request.repositories?.find((item) => item.id === id);

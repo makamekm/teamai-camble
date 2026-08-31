@@ -111,6 +111,7 @@ test("manifest is executable schema v2 with only declared action contract", asyn
   assert.equal(manifest.schemaVersion, 2);
   assert.deepEqual(manifest.runtime, { apiVersion: 1, engine: "node", entrypoint: "plugin.mjs" });
   assert.deepEqual(manifest.actions.map((item) => item.id), ["collect", "promote", "version-inspect", "version-apply", "android-build", "cluster-observe", "cluster-deploy"]);
+  assert.deepEqual(manifest.actions.flatMap((action) => action.inputs).map((input) => input.id).filter((id) => !/^[a-z][a-z0-9-]*$/.test(id)), []);
   for (const action of manifest.actions.filter((item) => item.mode === "write")) assert.ok(action.confirm.length > 0);
   assert.equal(manifest.actions.find((item) => item.id === "android-build").inputs.some((input) => input.id === "track"), false);
   assert.equal(JSON.stringify(manifest).includes("production"), false);
@@ -133,7 +134,7 @@ test("collect resolves exact refs and backend service directories", async () => 
 test("preprod plan preserves application/component special cases and immutable backend tags", async () => {
   const workspace = await root();
   const runner = refsRunner({ tags: { "refs/tags/admin-ui-*": `${B}\trefs/tags/admin-ui-2\n${B}\trefs/tags/admin-ui-9\n` } });
-  const value = request("promote", { environment: "preprod", applicationSha: A, backendSha: B, items: ["application3", "component", "admin-ui"], dryRun: true }, workspace);
+  const value = request("promote", { environment: "preprod", "application-sha": A, "backend-sha": B, items: ["application3", "component", "admin-ui"], "dry-run": true }, workspace);
   const plan = await planPromotion(value, { runner });
   assert.deepEqual(plan.updates, [
     { repository: "application3", kind: "branch", ref: "refs/heads/preprod", sha: A },
