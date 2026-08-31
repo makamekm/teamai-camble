@@ -16,6 +16,7 @@ export interface AgentSummary {
   arch: string;
   online: boolean;
   capabilities: Record<string, unknown>;
+  activeJobs?: Array<{ id: string; status: string }>;
 }
 
 export interface PluginArtifact {

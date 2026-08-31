@@ -29,7 +29,7 @@ test("Camble mini-frontend exposes version, build, Preprod and Prod workflows", 
   for (const label of [
     "Версионирование", "Билд", "Preprod", "Prod", "Обновить из application3/dev",
     "Проставить версию и билд", "Свободный агент", "Собрать application",
-    "dev → tags/[service]", "tags/[service] → prod/[service]", "Выберите сервисы",
+    "dev → tags/[service]", "tags/[service] → prod/[service]", "Мультиселект сервисов",
     "Выделить все", "Сбросить выделение", "Отстал от dev", "Отстал от Preprod",
     "Актуальный", "Развернуть выбранные", "История и прогресс",
   ]) assert.ok(component.includes(label), `missing Camble workflow label: ${label}`);
@@ -37,6 +37,9 @@ test("Camble mini-frontend exposes version, build, Preprod and Prod workflows", 
   assert.match(component, /role="tablist" aria-label="Camble release workspace"/);
   assert.match(component, /useEffect\(\(\) => \{ setSelectedItems\(\[\]\); \}, \[tab, collectOperation\?\.id\]\)/);
   assert.match(component, /setSelectedItems\(availableServices\.map/);
+  assert.match(component, /compatible\(id\)\.find\(isAgentFree\)/);
+  assert.match(component, /Текущий commit:/);
+  assert.match(component, /Исходный commit:/);
   assert.match(component, /sourceRef: text\(item\.sourceRef\)/);
   assert.match(component, /targetRef: text\(item\.targetRef\)/);
   assert.match(component, /operation\.progress\.map/);
