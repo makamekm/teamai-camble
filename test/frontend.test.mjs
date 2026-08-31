@@ -27,9 +27,9 @@ test("Camble mini-frontend preserves release console functionality and visual af
   const component = source("src/camble-release-console.tsx");
   const css = source("src/camble-release-console.css");
   for (const label of [
-    "Preprod", "Prod", "Собрать точный snapshot", "Source branch",
-    "application3 SHA", "backend SHA", "Выбрать все", "Полный promotion",
-    "План promotion", "Применить promotion", "Проверить версию",
+    "Preprod", "Prod", "Собрать данные", "Выберите сервисы",
+    "Полный состав окружения", "TeamAI обновит только отмеченные refs.",
+    "Развернуть", "История и прогресс", "Проверить версию",
     "Текущая версия", "Текущий commit", "Следующий build", "План версии",
     "Применить версию", "Android из последнего Preprod snapshot",
     "Google Play Internal", "Агент сборки", "План сборки", "Собрать Android",
@@ -38,13 +38,20 @@ test("Camble mini-frontend preserves release console functionality and visual af
     "Применить deploy", "Полная история и прогресс", "Structured output",
     "Failure", "Rollback", "Artifacts",
   ]) assert.ok(component.includes(label), `missing Camble label: ${label}`);
+  assert.doesNotMatch(component, /Собрать точный snapshot|<h4>1\. Snapshot<\/h4>/);
   assert.match(component, /role="tablist" aria-label="Camble release environment"/);
+  assert.match(component, /snapshot\.items\)\.map/);
   assert.match(component, /latestCollectSnapshot/);
   assert.match(component, /latestVersionInspection/);
   assert.match(component, /latestPreprodSnapshot/);
   assert.match(component, /operation\.progress\.map/);
   assert.match(component, /operation\.result\?\.output/);
   assert.match(component, /operation\.result\.artifacts/);
+  assert.match(component, /inspection\.commitSha/);
+  assert.match(component, /text\(pod\.pod\) \|\| text\(pod\.name\)/);
+  assert.match(component, /output\.rollback \?\? object\(output\.failure\)\.rollback/);
+  assert.match(component, /operation\.actionId !== null && \["cluster-observe", "cluster-deploy"\]\.includes\(operation\.actionId\)/);
+  assert.match(component, /REQUIRED_ACTIONS\.filter/);
   assert.match(css, /\.plugin-action-button\s*\{[^}]*border:\s*1px solid/);
   assert.match(css, /\.camble-release-console/);
   assert.match(css, /\.camble-cluster-card/);

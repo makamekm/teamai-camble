@@ -36,6 +36,46 @@
 @keyframes camble-rotate { to { transform: rotate(360deg); } }
 @media (max-width:700px) { .plugin-history summary { grid-template-columns: minmax(0,1fr) auto; }.plugin-history summary time { grid-column: 1 / -1; } }
 
+/* Original Camble release workspace (91be361). */
+.camble-original-release { min-width: 0; border: 1px solid var(--line-soft); border-radius: 11px; background: var(--panel); overflow: hidden; }
+.camble-original-release .plugin-tabs { height: 43px; padding: 0 18px; display: flex; gap: 4px; border-bottom: 1px solid var(--line-soft); }
+.camble-original-release .plugin-tabs button { min-width: 100px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); cursor: pointer; }
+.camble-original-release .plugin-tabs button.active { border-color: var(--accent); color: var(--text); }
+.camble-original-release .plugin-environment { padding: 18px; display: grid; gap: 14px; }
+.camble-original-release .plugin-environment-intro { display: flex; align-items: center; gap: 14px; }
+.camble-original-release .plugin-environment-intro > div:first-child { min-width: 0; flex: 1; }
+.camble-original-release .plugin-environment-intro h3 { margin: 0; font-size: 15px; }
+.camble-original-release .plugin-environment-intro p { margin: 5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.camble-collect-controls, .camble-deploy-controls { display: flex; align-items: end; gap: 8px; }
+.camble-collect-controls .camble-agent, .camble-deploy-controls .camble-agent { min-width: 210px; }
+.camble-original-release .plugin-snapshot-meta { padding: 9px 10px; display: flex; flex-wrap: wrap; gap: 7px 13px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--panel); }
+.camble-original-release .plugin-snapshot-meta span { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 9px; }
+.camble-original-release .plugin-snapshot-meta svg { width: 13px; color: var(--accent); }
+.camble-original-release .plugin-snapshot-meta code { color: var(--text); }
+.camble-original-release .plugin-selection { border: 1px solid var(--line-soft); border-radius: 11px; background: var(--panel); overflow: hidden; }
+.camble-original-release .plugin-selection > header { padding: 12px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line-soft); }
+.camble-original-release .plugin-selection > header > div { min-width: 0; flex: 1; }
+.camble-original-release .plugin-selection h4 { margin: 0; font-size: 12px; }
+.camble-original-release .plugin-selection p { margin: 4px 0 0; color: var(--muted); font-size: 9px; }
+.camble-original-release .plugin-selection > header > span { padding: 4px 7px; border-radius: 7px; background: var(--accent-soft); color: var(--accent); font-size: 9px; }
+.camble-original-release .plugin-items { max-height: 290px; padding: 8px; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 6px; overflow: auto; }
+.camble-original-release .plugin-items label { min-width: 0; padding: 9px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line-soft); border-radius: 8px; cursor: pointer; }
+.camble-original-release .plugin-items label.selected { border-color: rgba(163,255,87,.28); background: var(--accent-soft); }
+.camble-original-release .plugin-items input { width: 14px; height: 14px; accent-color: var(--accent); }
+.camble-original-release .plugin-items label > span { min-width: 0; display: grid; grid-template-columns: 14px minmax(0,1fr); gap: 2px 5px; }
+.camble-original-release .plugin-items svg { width: 13px; color: var(--accent); }
+.camble-original-release .plugin-items strong { overflow: hidden; font-size: 10px; white-space: nowrap; text-overflow: ellipsis; }
+.camble-original-release .plugin-items small { grid-column: 2; color: var(--muted-2); font-size: 8px; }
+.camble-original-release .plugin-deploy-bar { padding: 12px; display: flex; align-items: center; gap: 12px; border: 1px solid rgba(163,255,87,.17); border-radius: 10px; background: rgba(163,255,87,.035); }
+.camble-original-release .plugin-deploy-bar > div:first-child { min-width: 0; flex: 1; }
+.camble-original-release .plugin-deploy-bar strong { font-size: 11px; }
+.camble-original-release .plugin-deploy-bar p { margin: 4px 0 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.camble-original-release .plugin-no-snapshot { padding: 34px 14px; display: grid; place-items: center; text-align: center; color: var(--muted); }
+.camble-original-release .plugin-no-snapshot svg { color: var(--accent); }
+.camble-original-release .plugin-no-snapshot h4 { margin: 10px 0 4px; color: var(--text); }
+.camble-original-release .plugin-no-snapshot p { margin: 0; font-size: 10px; }
+.camble-original-release .camble-release-history { margin: 0 18px 20px; }
+
 .camble-release-console { display: grid; gap: 18px; }
 .camble-release-section { min-width: 0; display: grid; gap: 13px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
 .camble-release-section > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
@@ -74,5 +114,5 @@
 .camble-cluster-deploy fieldset { min-width: 0; padding: 0; border: 0; }.camble-cluster-deploy legend { margin-bottom: 7px; color: var(--muted); font-size: 9px; }
 .camble-operation-meta { padding: 8px 12px; display: flex; gap: 16px; color: var(--muted); font-size: 9px; border-bottom: 1px solid var(--line-soft); }
 .camble-history .plugin-result h4 { margin: 12px 0 6px; color: var(--muted); font-size: 9px; text-transform: uppercase; }
-@media (max-width: 900px) { .camble-release-grid, .camble-form-grid { grid-template-columns: 1fr; }.camble-form-grid .camble-actions { grid-column: 1; }.camble-inline-meta { grid-template-columns: auto minmax(0,1fr) !important; }.camble-actions { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }.camble-actions .plugin-action-button { min-width: 0; width: 100%; } }
-@media (max-width: 560px) { .camble-release-section { padding: 12px 10px; }.camble-release-section > header { gap: 8px; }.camble-items, .camble-cluster-grid, .camble-actions { grid-template-columns: 1fr; }.camble-panel dl, .camble-cluster-card dl { grid-template-columns: 1fr; }.camble-panel dt, .camble-cluster-card dt { margin-top: 5px; }.camble-selection-heading { align-items: stretch; flex-direction: column; }.camble-selection-heading button { width: 100%; }.camble-operation-meta { flex-direction: column; gap: 4px; } }
+@media (max-width: 900px) { .camble-release-grid, .camble-form-grid { grid-template-columns: 1fr; }.camble-form-grid .camble-actions { grid-column: 1; }.camble-inline-meta { grid-template-columns: auto minmax(0,1fr) !important; }.camble-actions { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }.camble-actions .plugin-action-button { min-width: 0; width: 100%; }.camble-original-release .plugin-items { grid-template-columns: repeat(2,minmax(0,1fr)); }.camble-collect-controls, .camble-deploy-controls { align-items: stretch; flex-direction: column; }.camble-collect-controls .camble-agent, .camble-deploy-controls .camble-agent { min-width: 0; } }
+@media (max-width: 560px) { .camble-release-section { padding: 12px 10px; }.camble-release-section > header { gap: 8px; }.camble-items, .camble-cluster-grid, .camble-actions, .camble-original-release .plugin-items { grid-template-columns: 1fr; }.camble-panel dl, .camble-cluster-card dl { grid-template-columns: 1fr; }.camble-panel dt, .camble-cluster-card dt { margin-top: 5px; }.camble-selection-heading { align-items: stretch; flex-direction: column; }.camble-selection-heading button { width: 100%; }.camble-operation-meta { flex-direction: column; gap: 4px; }.camble-original-release .plugin-environment { padding: 12px 10px; }.camble-original-release .plugin-environment-intro, .camble-original-release .plugin-deploy-bar { align-items: stretch; flex-direction: column; }.camble-original-release .plugin-tabs { padding: 0 8px; }.camble-original-release .plugin-tabs button { min-width: 90px; }.camble-original-release .camble-release-history { margin: 0 10px 12px; } }
