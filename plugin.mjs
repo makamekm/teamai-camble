@@ -613,6 +613,41 @@ async function observe(request, deps, expected = []) {
   return { namespace: CLUSTER.namespace, observedAt: new Date().toISOString(), rolledOut, services };
 }
 async function clusterObserve(request, deps) { return ok("Observed Camble cluster", await observe(request, deps)); }
+
+function boundedLogText(value, maxBytes = 32 * 1024) {
+  const buffer = Buffer.from(String(value ?? ""), "utf8");
+  if (buffer.length <= maxBytes) return { text: buffer.toString("utf8"), truncated: false };
+  return { text: buffer.subarray(buffer.length - maxBytes).toString("utf8"), truncated: true };
+}
+
+async function clusterLogs(request, deps) {
+  const runner = deps.runner ?? createCommandRunner();
+  const services = [];
+  for (const item of CLUSTER.services) {
+    const result = await runner("kubectl", [
+      "--request-timeout=15s", "logs", `deployment/${item.deployment}`,
+      "-n", CLUSTER.namespace, "--all-pods=true", "--prefix=true", "--timestamps=true",
+      "--since=30m", "--tail=100", "-c", item.container,
+    ], { allowFailure: true, maxOutput: 256 * 1024 });
+    const bounded = boundedLogText(result.stdout);
+    services.push({
+      service: item.id,
+      deployment: item.deployment,
+      status: result.code === 0 ? "ok" : "error",
+      reason: result.code === 0 ? null : kubectlFailureReason(result.stderr),
+      logs: bounded.text,
+      truncated: bounded.truncated,
+    });
+  }
+  return ok("Collected recent Camble cluster logs", {
+    namespace: CLUSTER.namespace,
+    observedAt: new Date().toISOString(),
+    since: "30m",
+    tailLinesPerPod: 100,
+    services,
+  });
+}
+
 function clusterSteps(plan, dryRun) {
   const tags = plan.map((item, index) => ({
     order: index + 1,
@@ -801,7 +836,7 @@ export async function execute(request, overrides = {}) {
   const platform = overrides.platform ?? process.platform;
   const environment = overrides.environment ?? process.env;
   const deps = { runner: overrides.runner ?? createCommandRunner({ platform, environment }), fetch: overrides.fetch ?? globalThis.fetch, sleep: overrides.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))), now: overrides.now ?? Date.now, platform, environment };
-  const handlers = { collect, promote, "version-inspect": versionInspect, "version-apply": versionApply, "android-build": androidBuild, "cluster-observe": clusterObserve, "cluster-deploy": clusterDeploy };
+  const handlers = { collect, promote, "version-inspect": versionInspect, "version-apply": versionApply, "android-build": androidBuild, "cluster-observe": clusterObserve, "cluster-logs": clusterLogs, "cluster-deploy": clusterDeploy };
   const id = actionId(request); const handler = handlers[id];
   if (!handler) fail(`Unknown action ${id}`);
   return handler(request, deps);

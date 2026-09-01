@@ -110,7 +110,7 @@ test("manifest is executable schema v2 with only declared action contract", asyn
   const manifest = JSON.parse(await (await import("node:fs/promises")).readFile(new URL("../teamai-plugin.json", import.meta.url), "utf8"));
   assert.equal(manifest.schemaVersion, 2);
   assert.deepEqual(manifest.runtime, { apiVersion: 1, engine: "node", entrypoint: "plugin.mjs" });
-  assert.deepEqual(manifest.actions.map((item) => item.id), ["collect", "promote", "version-inspect", "version-apply", "android-build", "cluster-observe", "cluster-deploy"]);
+  assert.deepEqual(manifest.actions.map((item) => item.id), ["collect", "promote", "version-inspect", "version-apply", "android-build", "cluster-observe", "cluster-logs", "cluster-deploy"]);
   assert.deepEqual(manifest.actions.flatMap((action) => action.inputs).map((input) => input.id).filter((id) => !/^[a-z][a-z0-9-]*$/.test(id)), []);
   for (const action of manifest.actions.filter((item) => item.mode === "write")) assert.ok(action.confirm.length > 0);
   assert.equal(manifest.actions.find((item) => item.id === "android-build").inputs.some((input) => input.id === "track"), false);
@@ -355,7 +355,23 @@ test("cluster observation verifies full source SHAs and exact running-pod image 
   assert.ok(runner.calls.some((call) => call.args[2] === "pods"));
 });
 
-test("cluster observation returns a bounded kubectl failure classification without raw stderr", async () => {
+test("cluster logs collect bounded recent logs for every configured deployment", async () => {
+  const runner = fakeRunner(async (command, args) => {
+    assert.equal(command, "kubectl");
+    assert.ok(args.includes("--since=30m"));
+    assert.ok(args.includes("--tail=100"));
+    return { code: 0, stdout: `recent log from ${args[2]}\n`, stderr: "" };
+  });
+  const { response, exitCode } = await executeContract(request("cluster-logs", {}), { runner });
+  assert.equal(exitCode, 0);
+  assert.equal(response.status, "ok");
+  assert.equal(response.output.namespace, "camee");
+  assert.equal(response.output.services.length, 3);
+  assert.equal(response.output.services.every((item) => item.status === "ok" && item.logs.includes("recent log")), true);
+  assert.equal(runner.calls.length, 3);
+});
+
+test("cluster observation returns a bounded kubectl failure reason without leaking stderr", async () => {
   const workspace = await root();
   const secret = "https://private-cluster.example/token-value";
   const runner = fakeRunner((command) => command === "kubectl"
