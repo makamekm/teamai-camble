@@ -631,7 +631,7 @@ async function clusterLogs(request, deps) {
     const result = await runner("kubectl", [
       "--request-timeout=15s", "logs", `deployment/${item.deployment}`,
       "-n", CLUSTER.namespace, "--all-pods=true", "--prefix=true", "--timestamps=true",
-      "--since=30m", "--tail=100", "-c", item.container,
+      "--since=6h", "--tail=1000", "-c", item.container,
     ], { allowFailure: true, maxOutput: 256 * 1024 });
     const bounded = boundedLogText(result.stdout);
     services.push({
@@ -646,8 +646,8 @@ async function clusterLogs(request, deps) {
   return ok("Collected recent Camble cluster logs", {
     namespace: CLUSTER.namespace,
     observedAt: new Date().toISOString(),
-    since: "30m",
-    tailLinesPerPod: 100,
+    since: "6h",
+    tailLinesPerPod: 1000,
     services,
   });
 }

@@ -358,8 +358,8 @@ test("cluster observation verifies full source SHAs and exact running-pod image 
 test("cluster logs collect bounded recent logs for every configured deployment", async () => {
   const runner = fakeRunner(async (command, args) => {
     assert.equal(command, "kubectl");
-    assert.ok(args.includes("--since=30m"));
-    assert.ok(args.includes("--tail=100"));
+    assert.ok(args.includes("--since=6h"));
+    assert.ok(args.includes("--tail=1000"));
     return { code: 0, stdout: `recent log from ${args[2]}\n`, stderr: "" };
   });
   const { response, exitCode } = await executeContract(request("cluster-logs", {}), { runner });
