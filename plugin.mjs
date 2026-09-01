@@ -84,6 +84,7 @@ export function createCommandRunner(options = {}) {
       windowsVerbatimArguments: invocation.windowsVerbatimArguments ?? false,
     });
     const stdout = [];
+    const stderr = [];
     let size = 0;
     const cap = options.maxOutput ?? 2 * 1024 * 1024;
     const collect = (target) => (chunk) => {
@@ -92,10 +93,14 @@ export function createCommandRunner(options = {}) {
       else if (target) target.push(chunk);
     };
     child.stdout.on("data", collect(stdout));
-    child.stderr.on("data", collect(null));
+    child.stderr.on("data", collect(stderr));
     child.on("error", () => reject(new PluginError("Subprocess could not be started")));
     child.on("close", (code) => {
-      const result = { code: code ?? 1, stdout: Buffer.concat(stdout).toString("utf8") };
+      const result = {
+        code: code ?? 1,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      };
       if (size > cap) return reject(new PluginError(`${command} output exceeded limit`));
       if (result.code !== 0 && !options.allowFailure) return reject(new PluginError(`${path.basename(command)} failed with exit code ${result.code}`));
       resolve(result);
@@ -563,15 +568,38 @@ function deploymentState(item, pods, mapping, expectation) {
     ready: deploymentReady && provenanceReady,
   };
 }
+function kubectlFailureReason(stderr) {
+  const message = String(stderr ?? "").toLowerCase();
+  if (/no such file|kubeconfig.*(?:missing|not found)|stat .*kube/.test(message)) return "KUBECONFIG_NOT_FOUND";
+  if (/context .* does not exist|current-context .* not found|no context exists/.test(message)) return "KUBECONFIG_CONTEXT_INVALID";
+  if (/certificate|x509|tls handshake/.test(message)) return "TLS_VALIDATION_FAILED";
+  if (/unauthorized|provide credentials|the server has asked for the client to provide credentials/.test(message)) return "AUTHENTICATION_FAILED";
+  if (/forbidden|cannot (?:get|list|watch)/.test(message)) return "AUTHORIZATION_FAILED";
+  if (/connection refused|actively refused/.test(message)) return "CONNECTION_REFUSED";
+  if (/i\/o timeout|context deadline exceeded|timed out/.test(message)) return "CONNECTION_TIMEOUT";
+  if (/no route to host|network is unreachable|couldn't get current server api group list|unable to connect to the server/.test(message)) return "CLUSTER_UNREACHABLE";
+  if (/not found/.test(message)) return "RESOURCE_NOT_FOUND";
+  return "UNCLASSIFIED";
+}
+
+async function kubectlJSON(deps, args) {
+  const result = await deps.runner("kubectl", args, { allowFailure: true });
+  if (result.code !== 0) {
+    const reason = kubectlFailureReason(result.stderr);
+    throw new PluginError(`kubectl failed: ${reason}`, { reason, exitCode: result.code });
+  }
+  return result.stdout;
+}
+
 async function observe(request, deps, expected = []) {
   const deploymentArgs = ["--request-timeout=10s", "get", "deployments", ...CLUSTER.services.map((item) => item.deployment), "-n", CLUSTER.namespace, "-o", "json"];
   const podArgs = ["--request-timeout=10s", "get", "pods", "-n", CLUSTER.namespace, "-o", "json"];
-  const [deploymentResult, podResult] = await Promise.all([
-    deps.runner("kubectl", deploymentArgs),
-    deps.runner("kubectl", podArgs),
+  const [deploymentJSON, podJSON] = await Promise.all([
+    kubectlJSON(deps, deploymentArgs),
+    kubectlJSON(deps, podArgs),
   ]);
-  const decoded = JSON.parse(deploymentResult.stdout);
-  const decodedPods = JSON.parse(podResult.stdout);
+  const decoded = JSON.parse(deploymentJSON);
+  const decodedPods = JSON.parse(podJSON);
   if (!Array.isArray(decoded.items)) fail("kubectl returned invalid deployment JSON");
   if (!Array.isArray(decodedPods.items)) fail("kubectl returned invalid pod JSON");
   const byName = new Map(decoded.items.map((item) => [item.metadata?.name, item]));

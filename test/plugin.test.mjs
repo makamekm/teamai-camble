@@ -355,6 +355,19 @@ test("cluster observation verifies full source SHAs and exact running-pod image 
   assert.ok(runner.calls.some((call) => call.args[2] === "pods"));
 });
 
+test("cluster observation returns a bounded kubectl failure classification without raw stderr", async () => {
+  const workspace = await root();
+  const secret = "https://private-cluster.example/token-value";
+  const runner = fakeRunner((command) => command === "kubectl"
+    ? { code: 1, stdout: "", stderr: `Unable to connect to the server: dial tcp ${secret}: i/o timeout` }
+    : { code: 0, stdout: "", stderr: "" });
+  const { response, exitCode } = await executeContract(request("cluster-observe", {}, workspace), { runner });
+  assert.equal(exitCode, 1);
+  assert.equal(response.summary, "kubectl failed: CONNECTION_TIMEOUT");
+  assert.deepEqual(response.output, { reason: "CONNECTION_TIMEOUT", exitCode: 1 });
+  assert.equal(JSON.stringify(response).includes(secret), false);
+});
+
 test("cluster observation rejects truncated source tags and mixed pod digests", async () => {
   const workspace = await root();
   const resources = kubernetesResources({ secondComponentDigest: `sha256:${"3".repeat(64)}` });
