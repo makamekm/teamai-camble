@@ -632,7 +632,7 @@ async function clusterLogs(request, deps) {
       "--request-timeout=15s", "logs", `deployment/${item.deployment}`,
       "-n", CLUSTER.namespace, "--all-pods=true", "--prefix=true", "--timestamps=true",
       "--since=6h", "--tail=1000", "-c", item.container,
-    ], { allowFailure: true, maxOutput: 256 * 1024 });
+    ], { allowFailure: true, maxOutput: 2 * 1024 * 1024 });
     const bounded = boundedLogText(result.stdout);
     services.push({
       service: item.id,
