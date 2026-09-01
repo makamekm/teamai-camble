@@ -75,6 +75,14 @@
       "inputs": []
     },
     {
+      "id": "cluster-logs",
+      "label": "Collect cluster logs",
+      "description": "Collect bounded recent logs from all Camble deployment pods in the camee namespace for live incident diagnosis.",
+      "mode": "read",
+      "capabilities": ["node", "kubectl"],
+      "inputs": []
+    },
+    {
       "id": "cluster-deploy",
       "label": "Deploy cluster services",
       "description": "Create immutable full-SHA provenance tags, lease-update Devtron branches and verify deployment/pod digests with safe branch recovery.",
