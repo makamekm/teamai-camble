@@ -12,7 +12,7 @@ const BRANCH = /^(?:dev|(?:test|testing|qa|feature|fix|bugfix)\/[A-Za-z0-9][A-Za
 const PLAY_TRACK = "internal";
 const INHERITED_ENV = [
   "PATH", "PATHEXT", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
-  "SystemRoot", "WINDIR", "COMSPEC", "ComSpec", "TEMP", "TMP", "TMPDIR",
+  "SystemRoot", "WINDIR", "COMSPEC", "ComSpec", "TEMP", "TMP", "TMPDIR", "KUBECONFIG",
   "JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT", "GRADLE_USER_HOME",
   "LANG", "LC_ALL", "CI",
 ];

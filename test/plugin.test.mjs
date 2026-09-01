@@ -564,7 +564,7 @@ test("Windows command runner uses cmd shims and an inherited environment allowli
   const spawnImpl = recordedSpawn();
   const runner = createCommandRunner({
     platform: "win32",
-    environment: { PATH: "C:\\tools", ComSpec: "C:\\Windows\\System32\\cmd.exe", TOP_SECRET: "must-not-leak" },
+    environment: { PATH: "C:\\tools", ComSpec: "C:\\Windows\\System32\\cmd.exe", KUBECONFIG: "C:\\Temp\\managed-kubeconfig.yaml", TOP_SECRET: "must-not-leak" },
     spawnImpl,
   });
   await runner("npm", ["ci", "--no-audit"], { env: { BACKEND_BRANCH: A } });
@@ -575,6 +575,7 @@ test("Windows command runner uses cmd shims and an inherited environment allowli
   assert.equal(spawnImpl.calls[1].args[3], '""gradlew.bat" "app:bundleRelease" "-Dvalue=with space""');
   assert.equal(spawnImpl.calls[0].options.windowsVerbatimArguments, true);
   assert.equal(spawnImpl.calls[0].options.env.PATH, "C:\\tools");
+  assert.equal(spawnImpl.calls[0].options.env.KUBECONFIG, "C:\\Temp\\managed-kubeconfig.yaml");
   assert.equal(spawnImpl.calls[0].options.env.BACKEND_BRANCH, A);
   assert.equal(spawnImpl.calls[0].options.env.TOP_SECRET, undefined);
 });
