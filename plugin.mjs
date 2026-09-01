@@ -623,7 +623,11 @@ function boundedLogText(value, maxBytes = 32 * 1024) {
 async function clusterLogs(request, deps) {
   const runner = deps.runner ?? createCommandRunner();
   const services = [];
-  for (const item of CLUSTER.services) {
+  const workloads = [
+    ...CLUSTER.services,
+    { id: "stream-room-watcher", deployment: "stream-room-watcher-camee", container: "stream-room-watcher" },
+  ];
+  for (const item of workloads) {
     const result = await runner("kubectl", [
       "--request-timeout=15s", "logs", `deployment/${item.deployment}`,
       "-n", CLUSTER.namespace, "--all-pods=true", "--prefix=true", "--timestamps=true",

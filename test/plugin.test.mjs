@@ -366,9 +366,9 @@ test("cluster logs collect bounded recent logs for every configured deployment",
   assert.equal(exitCode, 0);
   assert.equal(response.status, "ok");
   assert.equal(response.output.namespace, "camee");
-  assert.equal(response.output.services.length, 3);
+  assert.equal(response.output.services.length, 4);
   assert.equal(response.output.services.every((item) => item.status === "ok" && item.logs.includes("recent log")), true);
-  assert.equal(runner.calls.length, 3);
+  assert.equal(runner.calls.length, 4);
 });
 
 test("cluster observation returns a bounded kubectl failure reason without leaking stderr", async () => {
