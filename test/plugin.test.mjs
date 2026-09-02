@@ -1,13 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { createCommandRunner, execute, executeContract, planPromotion, PluginError } from "../plugin.mjs";
+import { createCommandRunner, createProgressReporter, execute, executeContract, planPromotion, PluginError } from "../plugin.mjs";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
@@ -110,10 +111,23 @@ test("manifest is executable schema v2 with only declared action contract", asyn
   const manifest = JSON.parse(await (await import("node:fs/promises")).readFile(new URL("../teamai-plugin.json", import.meta.url), "utf8"));
   assert.equal(manifest.schemaVersion, 2);
   assert.deepEqual(manifest.runtime, { apiVersion: 1, engine: "node", entrypoint: "plugin.mjs" });
-  assert.deepEqual(manifest.actions.map((item) => item.id), ["collect", "promote", "version-inspect", "version-apply", "android-build", "cluster-observe", "cluster-logs", "cluster-deploy"]);
+  assert.deepEqual(manifest.actions.map((item) => item.id), ["collect", "promote", "version-inspect", "version-apply", "android-build", "test", "cluster-observe", "cluster-logs", "cluster-deploy"]);
+  assert.deepEqual(manifest.surfaces, { chat: { test: { actionId: "test" } } });
   assert.deepEqual(manifest.actions.flatMap((action) => action.inputs).map((input) => input.id).filter((id) => !/^[a-z][a-z0-9-]*$/.test(id)), []);
   for (const action of manifest.actions.filter((item) => item.mode === "write")) assert.ok(action.confirm.length > 0);
   assert.equal(manifest.actions.find((item) => item.id === "android-build").inputs.some((input) => input.id === "track"), false);
+  const chatTest = manifest.actions.find((item) => item.id === "test");
+  assert.equal(chatTest.mode, "write");
+  assert.deepEqual(chatTest.inputs.map(({ id, type, required }) => ({ id, type, required })), [
+    { id: "environment", type: "enum", required: true },
+    { id: "targets", type: "multiselect", required: true },
+    { id: "device-id", type: "string", required: false },
+    { id: "comment", type: "string", required: false },
+    { id: "application-branch", type: "string", required: false },
+    { id: "backend-branch", type: "string", required: false },
+  ]);
+  assert.deepEqual(chatTest.inputs[0].options.map((item) => item.value), ["test.rulet.tv", "peprod.rulet.tv"]);
+  assert.deepEqual(chatTest.inputs[1].options.map((item) => item.value), ["Desktop", "Chrome", "Android"]);
   assert.equal(JSON.stringify(manifest).includes("production"), false);
 });
 
@@ -630,4 +644,291 @@ test("validation rejects unknown actions, unsafe branches and malformed requests
   await assert.rejects(() => execute(request("missing", {}, workspace), { runner }), /Unknown action/);
   await assert.rejects(() => execute(request("cluster-deploy", { sourceBranch: "main", services: ["component"], dryRun: true }, workspace), { runner }), /Invalid source branch/);
   await assert.rejects(() => execute({ ...request("collect", {}, workspace), apiVersion: 2 }, { runner }), /Unsupported/);
+});
+
+function htmlResponse(url, options = {}) {
+  const body = options.body ?? "<!doctype html><html><head><title>Camble</title></head><body><main>ready</main></body></html>";
+  return {
+    status: options.status ?? 200,
+    url: options.finalUrl ?? url,
+    headers: { get: (name) => name.toLowerCase() === "content-type" ? (options.contentType ?? "text/html; charset=utf-8") : null },
+    text: async () => body,
+  };
+}
+
+function browserTestRunner(workspace, options = {}) {
+  return refsRunner({
+    heads: {
+      "application3:refs/heads/feature/chat-test": C,
+      "backend:refs/heads/fix/chat-test": D,
+    },
+    handler: async (command, args) => {
+      if (command !== "chrome") return { code: options.chromeMissing ? 1 : 0, stdout: "", stderr: "" };
+      if (args[0] === "--version") return { code: options.chromeMissing ? 1 : 0, stdout: "Google Chrome 140.0.0\n", stderr: "" };
+      if (args.includes("--dump-dom")) return { code: 0, stdout: options.invalidDom ? "<html><body>chrome-error://chromewebdata ERR_FAILED</body></html>" : "<!doctype html><html><head><title>Camble Test</title></head><body><div id=\"root\">ready</div></body></html>", stderr: "" };
+      const screenshot = args.find((item) => item.startsWith("--screenshot="))?.slice("--screenshot=".length);
+      if (screenshot) await writeFile(screenshot, `browser-${path.basename(screenshot)}`);
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+}
+
+function androidTestRunner(workspace, options = {}) {
+  let mobileUI = "chrome";
+  let screenshotNumber = 0;
+  return refsRunner({
+    heads: {
+      "application3:refs/heads/feature/chat-test": C,
+      "backend:refs/heads/fix/chat-test": D,
+    },
+    clone: async (target, url) => {
+      if (!url.includes("application3")) return;
+      await mkdir(path.join(target, "builder"), { recursive: true });
+      await mkdir(path.join(target, "android", "app"), { recursive: true });
+      await writeFile(path.join(target, "app.json"), JSON.stringify({ expo: { version: "5.2.0-test.1", android: { versionCode: 73, package: "com.rulettv.app" }, ios: { buildNumber: "73" } } }));
+      await writeFile(path.join(target, "android", "gradle.properties"), "org.gradle.daemon=false\n");
+    },
+    handler: async (command, args, commandOptions) => {
+      if (command === "./gradlew" || command === "gradlew.bat") {
+        const applicationRoot = path.dirname(commandOptions.cwd);
+        const apkDir = path.join(applicationRoot, "android", "app", "build", "outputs", "apk", "release");
+        await mkdir(apkDir, { recursive: true });
+        await writeFile(path.join(apkDir, "app-release.apk"), "signed-apk-content");
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (command === "apksigner") {
+        if (args[0] === "version") return { code: options.failure === "apksigner" ? 1 : 0, stdout: "0.9\n", stderr: "" };
+        return { code: options.failure === "signature" ? 1 : 0, stdout: `Verifies\nSigner #1 certificate SHA-256 digest: ${"3".repeat(64)}\n`, stderr: "" };
+      }
+      if (command === "mobilerun") {
+        if (args[0] === "--version") return { code: 0, stdout: "mobilerun 1.0\n", stderr: "" };
+        if (args[0] === "devices") return { code: 0, stdout: options.failure === "device" ? "No local devices connected.\n" : "Found 1 local device(s):\n  • DEVICE-1\n", stderr: "" };
+        if (args[0] === "ping") return { code: options.failure === "ping" ? 1 : 0, stdout: "ready\n", stderr: "" };
+        if (args[0] === "device" && args[1] === "install") return { code: options.failure === "install" ? 2 : 0, stdout: "installed\n", stderr: "" };
+        if (args[0] === "device" && args[1] === "apps") return { code: 0, stdout: options.failure === "apps" ? "com.android.chrome\n" : "com.rulettv.app  (Camble)\ncom.android.chrome\n", stderr: "" };
+        if (args[0] === "device" && args[1] === "open-url") { mobileUI = "chrome"; return { code: options.failure === "mobile-run" ? 3 : 0, stdout: "done\n", stderr: "" }; }
+        if (args[0] === "device" && args[1] === "start") { mobileUI = "apk"; return { code: 0, stdout: "started\n", stderr: "" }; }
+        if (args[0] === "device" && args[1] === "ready") return { code: options.failure === "ready" ? 4 : 0, stdout: "ready\n", stderr: "" };
+        if (args[0] === "device" && args[1] === "ui") {
+          const stdout = mobileUI === "chrome"
+            ? (options.failure === "mobile-evidence" ? "Chrome address bar example.invalid\n" : "Chrome address bar test.rulet.tv\n")
+            : (options.failure === "apk-ui" ? "" : "Camble application ready\n");
+          return { code: 0, stdout, stderr: "" };
+        }
+        if (args[0] === "device" && args[1] === "screenshot") {
+          screenshotNumber += 1;
+          const screenshot = path.join(workspace, `mobilerun-${screenshotNumber}.png`);
+          await writeFile(screenshot, `mobile-screenshot-${screenshotNumber}`);
+          return { code: 0, stdout: `${screenshot}\n`, stderr: "" };
+        }
+        return { code: 0, stdout: "ok\n", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+}
+
+function androidTestRequest(workspace) {
+  const value = request("test", {
+    environment: "test.rulet.tv",
+    targets: ["Android"],
+    "device-id": "DEVICE-1",
+    comment: "release candidate smoke",
+    "application-branch": "feature/chat-test",
+    "backend-branch": "fix/chat-test",
+  }, workspace);
+  value.secrets = {
+    ANDROID_UPLOAD_KEYSTORE_BASE64: Buffer.alloc(32, 1).toString("base64"),
+    ANDROID_UPLOAD_STORE_PASSWORD: "store-secret",
+    ANDROID_UPLOAD_KEY_ALIAS: "upload",
+    ANDROID_UPLOAD_KEY_PASSWORD: "key-secret",
+  };
+  return value;
+}
+
+test("chat test validation is exact and rejects malformed input before any work", async () => {
+  const workspace = await root();
+  const valid = { environment: "test.rulet.tv", targets: ["Desktop"] };
+  const cases = [
+    {},
+    { targets: ["Desktop"] },
+    { environment: "preprod.rulet.tv", targets: ["Desktop"] },
+    { environment: "test.rulet.tv", targets: [] },
+    { environment: "test.rulet.tv", targets: ["desktop"] },
+    { environment: "test.rulet.tv", targets: ["Chrome", "Chrome"] },
+    { ...valid, "device-id": "bad device" },
+    { ...valid, "application-branch": "-main" },
+    { ...valid, "backend-branch": "../main" },
+    { ...valid, comment: "bad\u0000comment" },
+    { ...valid, "dry-run": true },
+  ];
+  for (const input of cases) {
+    const runner = fakeRunner(() => assert.fail(`invalid test input invoked a subprocess: ${JSON.stringify(input)}`));
+    const result = await executeContract(request("test", input, workspace), { runner });
+    assert.equal(result.response.status, "error", JSON.stringify(input));
+    assert.equal(result.exitCode, 1);
+    assert.equal(runner.calls.length, 0);
+  }
+});
+
+test("Desktop and Chrome use real browser commands in stable order with HTTP, DOM and screenshot evidence", async () => {
+  const workspace = await root();
+  const runner = browserTestRunner(workspace);
+  const progress = [];
+  const fetchCalls = [];
+  const result = await execute(request("test", {
+    environment: "peprod.rulet.tv",
+    targets: ["Chrome", "Desktop"],
+    "application-branch": "feature/chat-test",
+    "backend-branch": "fix/chat-test",
+  }, workspace), {
+    runner,
+    chromePath: "chrome",
+    fetch: async (url) => { fetchCalls.push(url); return htmlResponse(url); },
+    progress: async (event) => progress.push(structuredClone(event)),
+    now: () => Date.UTC(2026, 8, 2, 12, 0, 0),
+  });
+  assert.equal(result.status, "ok");
+  assert.equal(result.output.deepLink, "https://peprod.rulet.tv/?env=peprod.rulet.tv");
+  assert.deepEqual(result.output.targets.map(({ target, status }) => ({ target, status })), [{ target: "Desktop", status: "passed" }, { target: "Chrome", status: "passed" }]);
+  assert.deepEqual(result.output.provenance.application, { repository: "application3", branch: "feature/chat-test", sha: C });
+  assert.deepEqual(result.output.provenance.backend, { repository: "backend", branch: "fix/chat-test", sha: D });
+  assert.equal(fetchCalls.length, 1);
+  assert.deepEqual(runner.calls.filter((call) => call.command === "chrome").map((call) => call.args.includes("--dump-dom") ? "dom" : call.args.some((item) => item.startsWith("--screenshot=")) ? "screenshot" : "version"), ["version", "dom", "screenshot", "dom", "screenshot"]);
+  assert.deepEqual(result.artifacts.map((item) => item.type), ["screenshot", "screenshot"]);
+  assert.equal(result.output.screenshots.length, 2);
+  assert.ok(result.output.screenshots.every((item) => /^[0-9a-f]{64}$/.test(item.sha256)));
+  assert.deepEqual(progress.map((item) => item.step.status), ["running", "passed", "running", "passed", "running", "passed", "running", "passed"]);
+  assert.equal(runner.calls.some((call) => call.command === "npm" || call.command === "mobilerun" || call.args[0] === "push"), false);
+});
+
+test("chat scheduler repository branch bindings are the default source of immutable provenance", async () => {
+  const workspace = await root();
+  const runner = browserTestRunner(workspace);
+  const value = request("test", { environment: "test.rulet.tv", targets: ["Desktop"] }, workspace);
+  value.repositories = value.repositories.map((item) => ({ ...item, defaultBranch: item.id === "application3" ? "feature/chat-test" : "fix/chat-test" }));
+  const result = await execute(value, { runner, chromePath: "chrome", fetch: async (url) => htmlResponse(url) });
+  assert.equal(result.output.provenance.application.branch, "feature/chat-test");
+  assert.equal(result.output.provenance.backend.branch, "fix/chat-test");
+  assert.deepEqual(runner.calls.filter((call) => call.command === "git" && call.args[0] === "ls-remote").map((call) => call.args[2]), ["refs/heads/feature/chat-test", "refs/heads/fix/chat-test"]);
+});
+
+test("browser checks fail closed for missing Chrome, HTTP failure and browser error DOM", async () => {
+  const failures = [
+    {
+      name: "missing Chrome",
+      runner: (workspace) => browserTestRunner(workspace, { chromeMissing: true }),
+      fetch: async (url) => htmlResponse(url),
+      expectedStep: "resolve-chrome",
+      expected: /Chrome\/Chromium executable not found/,
+    },
+    {
+      name: "HTTP failure",
+      runner: (workspace) => browserTestRunner(workspace),
+      fetch: async (url) => htmlResponse(url, { status: 503 }),
+      expectedStep: "desktop",
+      expected: /HTTP check failed with status 503/,
+    },
+    {
+      name: "browser error DOM",
+      runner: (workspace) => browserTestRunner(workspace, { invalidDom: true }),
+      fetch: async (url) => htmlResponse(url),
+      expectedStep: "desktop",
+      expected: /Desktop DOM check failed/,
+    },
+  ];
+  for (const fixture of failures) {
+    const workspace = await root();
+    const runner = fixture.runner(workspace);
+    const result = await executeContract(request("test", { environment: "test.rulet.tv", targets: ["Desktop"] }, workspace), { runner, chromePath: "chrome", fetch: fixture.fetch });
+    assert.equal(result.response.status, "error", fixture.name);
+    assert.match(result.response.summary, fixture.expected, fixture.name);
+    assert.equal(result.response.output.status, "failed");
+    assert.equal(result.response.output.steps.find((item) => item.id === fixture.expectedStep).status, "failed");
+    assert.equal(result.exitCode, 1);
+  }
+});
+
+test("Android resolves exact branch SHAs, builds one immutable signed APK and tests mobile Chrome before the APK", async () => {
+  const workspace = await root();
+  const runner = androidTestRunner(workspace);
+  const result = await execute(androidTestRequest(workspace), { runner, apksignerPath: "apksigner", mobilerunPath: "mobilerun", environment: {} });
+  assert.equal(result.status, "ok");
+  assert.equal(result.output.status, "passed");
+  assert.deepEqual(result.output.steps.map((item) => [item.id, item.status]), [
+    ["resolve-sources", "passed"],
+    ["build-android", "passed"],
+    ["resolve-device", "passed"],
+    ["install-android", "passed"],
+    ["mobile-chrome", "passed"],
+    ["installed-apk", "passed"],
+  ]);
+  const apk = result.output.provenance.androidArtifact;
+  assert.equal(apk.path, `artifacts/camble-${C}-${D}.apk`);
+  assert.equal(apk.sha256, createHash("sha256").update("signed-apk-content").digest("hex"));
+  assert.deepEqual(apk.signed, { verified: true, certificateSha256: "3".repeat(64), verifier: "apksigner" });
+  assert.equal(apk.applicationSha, C);
+  assert.equal(apk.backendSha, D);
+  assert.equal((await stat(path.join(workspace, apk.path))).mode & 0o777, 0o400);
+  assert.equal((await readFile(path.join(workspace, apk.path), "utf8")), "signed-apk-content");
+  assert.deepEqual(result.artifacts.map((item) => item.type), ["apk", "screenshot", "screenshot"]);
+  assert.ok(result.output.screenshots.every((item) => /^[0-9a-f]{64}$/.test(item.sha256)));
+  const mobileOrder = runner.calls.filter((call) => call.command === "mobilerun").map((call) => call.args.slice(0, 2).join(" "));
+  assert.deepEqual(mobileOrder, ["--version", "devices", "ping -d", "device install", "device apps", "device open-url", "device ui", "device screenshot", "device start", "device ui", "device screenshot"]);
+  assert.deepEqual(runner.calls.filter((call) => call.command === "git" && call.args[0] === "ls-remote").map((call) => call.args[2]), ["refs/heads/feature/chat-test", "refs/heads/fix/chat-test"]);
+  assert.equal(runner.calls.some((call) => call.command === "git" && call.args[0] === "push"), false);
+});
+
+test("Android fails terminally for credentials, signing, device, install, deep-link and app evidence failures", async () => {
+  const cases = [
+    { failure: "credentials", step: "build-android", message: /Missing ANDROID_UPLOAD_KEYSTORE_BASE64/ },
+    { failure: "apksigner", step: "build-android", message: /apksigner executable not found/ },
+    { failure: "signature", step: "build-android", message: /signature verification failed/ },
+    { failure: "device", step: "resolve-device", message: /not in the fresh device list/ },
+    { failure: "install", step: "install-android", message: /APK install failed/ },
+    { failure: "mobile-evidence", step: "mobile-chrome", message: /did not prove/ },
+    { failure: "apk-ui", step: "installed-apk", message: /empty UI tree/ },
+  ];
+  for (const fixture of cases) {
+    const workspace = await root();
+    const value = androidTestRequest(workspace);
+    if (fixture.failure === "credentials") delete value.secrets.ANDROID_UPLOAD_KEYSTORE_BASE64;
+    const runner = androidTestRunner(workspace, { failure: fixture.failure });
+    const result = await executeContract(value, { runner, apksignerPath: "apksigner", mobilerunPath: "mobilerun", environment: {} });
+    assert.equal(result.response.status, "error", fixture.failure);
+    assert.match(result.response.summary, fixture.message, fixture.failure);
+    assert.equal(result.response.output.status, "failed", fixture.failure);
+    assert.equal(result.response.output.steps.find((item) => item.id === fixture.step).status, "failed", fixture.failure);
+    assert.equal(result.response.output.verdict, "failed", fixture.failure);
+    if (["credentials", "apksigner", "signature"].includes(fixture.failure)) {
+      assert.equal(result.response.artifacts.length, 0, fixture.failure);
+    } else {
+      assert.equal(result.response.artifacts[0]?.type, "apk", `${fixture.failure} must retain immutable APK evidence`);
+    }
+    assert.equal(result.exitCode, 1, fixture.failure);
+  }
+});
+
+test("TEAMAI_PROGRESS reporter emits redacted JSON only on the prefixed stderr contract", async () => {
+  const chunks = [];
+  const value = { secrets: { API_TOKEN: "progress-private-value" }, repositories: [] };
+  const reporter = createProgressReporter(value, {}, { write: (chunk) => chunks.push(chunk) });
+  await reporter({ apiVersion: 1, actionId: "test", event: "step", error: "failed progress-private-value" });
+  assert.equal(chunks.length, 1);
+  assert.match(chunks[0], /^TEAMAI_PROGRESS /);
+  assert.equal(chunks[0].includes("progress-private-value"), false);
+  const decoded = JSON.parse(chunks[0].slice("TEAMAI_PROGRESS ".length));
+  assert.equal(decoded.error, "failed [REDACTED]");
+});
+
+test("command runner enforces bounded subprocess timeouts", async () => {
+  const spawnImpl = () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => queueMicrotask(() => child.emit("close", null));
+    return child;
+  };
+  const runner = createCommandRunner({ environment: { PATH: "/bin" }, spawnImpl });
+  await assert.rejects(() => runner("chrome", ["--dump-dom"], { timeoutMs: 5 }), /timed out after 5ms/);
 });

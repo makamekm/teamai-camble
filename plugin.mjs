@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { mkdir, readFile, readdir, writeFile, copyFile, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { chmod, mkdir, readFile, readdir, writeFile, copyFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9,7 +11,12 @@ const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const ITEM = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
 const VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const BRANCH = /^(?:dev|(?:test|testing|qa|feature|fix|bugfix)\/[A-Za-z0-9][A-Za-z0-9._/-]{0,199})$/;
+const DEVICE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+const ANDROID_PACKAGE = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
 const PLAY_TRACK = "internal";
+const TEST_ENVIRONMENTS = new Set(["test.rulet.tv", "peprod.rulet.tv"]);
+const TEST_TARGETS = ["Desktop", "Chrome", "Android"];
+const TEST_INPUTS = new Set(["environment", "targets", "device-id", "comment", "application-branch", "backend-branch"]);
 const INHERITED_ENV = [
   "PATH", "PATHEXT", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
   "SystemRoot", "WINDIR", "COMSPEC", "ComSpec", "TEMP", "TMP", "TMPDIR", "KUBECONFIG",
@@ -20,6 +27,7 @@ const SECRET_ENV = [
   "ANDROID_UPLOAD_KEYSTORE_BASE64", "ANDROID_UPLOAD_STORE_PASSWORD",
   "ANDROID_UPLOAD_KEY_ALIAS", "ANDROID_UPLOAD_KEY_PASSWORD",
   "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON", "GITHUB_TOKEN",
+  "MOBILERUN_CLOUD_API_KEY", "MOBILERUN_PORTAL_TOKEN",
 ];
 const CLUSTER = {
   namespace: "camee",
@@ -94,8 +102,28 @@ export function createCommandRunner(options = {}) {
     };
     child.stdout.on("data", collect(stdout));
     child.stderr.on("data", collect(stderr));
-    child.on("error", () => reject(new PluginError("Subprocess could not be started")));
+    let settled = false;
+    let timedOut = false;
+    const timeoutMs = options.timeoutMs;
+    if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60 * 60 * 1000)) {
+      child.kill("SIGKILL");
+      return reject(new PluginError("Invalid subprocess timeout"));
+    }
+    const timer = timeoutMs === undefined ? null : setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+    child.on("error", () => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      reject(new PluginError("Subprocess could not be started"));
+    });
     child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (timedOut) return reject(new PluginError(`${path.basename(command)} timed out after ${timeoutMs}ms`));
       const result = {
         code: code ?? 1,
         stdout: Buffer.concat(stdout).toString("utf8"),
@@ -419,26 +447,54 @@ function secret(request, deps, name, required = true) {
 }
 function gradleProperty(value) { return value.replaceAll("\\", "\\\\").replaceAll("\r", "\\r").replaceAll("\n", "\\n").replaceAll("=", "\\=").replaceAll(":", "\\:"); }
 async function assertFile(file) { const value = await stat(file).catch(() => null); if (!value?.isFile() || value.size < 1) fail(`Missing build output ${path.basename(file)}`); }
-async function androidBuild(request, deps) {
-  const input = inputs(request);
-  const dryRun = boolean(input.dryRun, true);
-  if (input.track !== undefined && input.track !== PLAY_TRACK) fail("Google Play track is fixed to internal");
-  const app = repository(request, "application3");
-  const backend = repository(request, "backend");
-  const [applicationSha, backendSha] = await Promise.all([exactRef(deps.runner, app, "dev"), exactRef(deps.runner, backend, "dev")]);
-  if (input.applicationSha !== undefined && input.applicationSha !== applicationSha) fail("application3:dev moved; refresh build data");
-  if (input.backendSha !== undefined && input.backendSha !== backendSha) fail("backend:dev moved; refresh build data");
+async function sha256File(file) {
+  const hash = createHash("sha256");
+  await new Promise((resolve, reject) => {
+    const stream = createReadStream(file);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", resolve);
+  });
+  return hash.digest("hex");
+}
+async function executableCandidate(runner, candidates, versionArgs, label) {
+  for (const candidate of unique(candidates.filter((value) => typeof value === "string" && value.trim()).map((value) => value.trim()))) {
+    try {
+      const result = await runner(candidate, versionArgs, { allowFailure: true, timeoutMs: 5_000, maxOutput: 64 * 1024 });
+      if (result.code === 0) return candidate;
+    } catch {
+      // Try the next trusted candidate and report one explicit terminal error below.
+    }
+  }
+  fail(`${label} executable not found`);
+}
+async function resolveApksigner(request, deps) {
+  const candidates = [deps.apksignerPath, request.tools?.apksigner];
+  const sdkRoots = unique([request.tools?.android, deps.environment.ANDROID_SDK_ROOT, deps.environment.ANDROID_HOME].filter((value) => typeof value === "string" && path.isAbsolute(value)));
+  for (const sdkRoot of sdkRoots) {
+    const buildTools = path.join(sdkRoot, "build-tools");
+    const versions = await readdir(buildTools, { withFileTypes: true }).catch(() => []);
+    for (const version of versions.filter((item) => item.isDirectory()).map((item) => item.name).sort().reverse()) {
+      candidates.push(path.join(buildTools, version, deps.platform === "win32" ? "apksigner.bat" : "apksigner"));
+    }
+  }
+  candidates.push(deps.platform === "win32" ? "apksigner.bat" : "apksigner");
+  return executableCandidate(deps.runner, candidates, ["version"], "Android apksigner");
+}
+async function buildSignedAndroid(request, deps, options) {
   const root = workspace(request);
-  const applicationRoot = path.join(root, "application");
-  const backendRoot = path.join(root, "backend");
-  if (dryRun) return ok("Planned application3 dev build", { dryRun, applicationSha, backendSha, verifiedBranch: "dev", storeTrack: PLAY_TRACK, steps: ["resolve current dev SHAs", "clone exact SHAs", "npm ci/preinit", "signed APK+AAB", "optional Google Play Internal upload"] });
-  await cloneExact(deps.runner, app, applicationSha, applicationRoot);
-  await cloneExact(deps.runner, backend, backendSha, backendRoot);
-  await deps.runner("npm", ["ci", "--no-audit", "--no-fund"], { cwd: applicationRoot });
-  await deps.runner("npm", ["install", "--no-package-lock", "--no-audit", "--no-fund"], { cwd: path.join(applicationRoot, "builder") });
-  await deps.runner("npm", ["run", "preinit"], { cwd: applicationRoot, env: { BACKEND_DIR: backendRoot, BACKEND_BRANCH: backendSha } });
+  const buildRoot = path.join(root, options.directory);
+  const applicationRoot = path.join(buildRoot, "application");
+  const backendRoot = path.join(buildRoot, "backend");
+  await cloneExact(deps.runner, repository(request, "application3"), options.applicationSha, applicationRoot);
+  await cloneExact(deps.runner, repository(request, "backend"), options.backendSha, backendRoot);
+  await deps.runner("npm", ["ci", "--no-audit", "--no-fund"], { cwd: applicationRoot, timeoutMs: 10 * 60 * 1000 });
+  await deps.runner("npm", ["install", "--no-package-lock", "--no-audit", "--no-fund"], { cwd: path.join(applicationRoot, "builder"), timeoutMs: 5 * 60 * 1000 });
+  await deps.runner("npm", ["run", "preinit"], { cwd: applicationRoot, env: { BACKEND_DIR: backendRoot, BACKEND_BRANCH: options.backendSha }, timeoutMs: 5 * 60 * 1000 });
   const appJson = JSON.parse(await readFile(path.join(applicationRoot, "app.json"), "utf8"));
   const { versionName, buildNumber } = appVersion(appJson, "Generated Camble app.json");
+  const packageName = appJson?.expo?.android?.package;
+  if (options.requirePackage && (typeof packageName !== "string" || !ANDROID_PACKAGE.test(packageName))) fail("Generated Camble app.json has an invalid Android package");
   const keystore = Buffer.from(secret(request, deps, "ANDROID_UPLOAD_KEYSTORE_BASE64"), "base64");
   if (keystore.length < 32 || keystore.length > 1024 * 1024) fail("Invalid Android upload keystore");
   await writeFile(path.join(applicationRoot, "android", "app", "upload.jks"), keystore, { mode: 0o600 });
@@ -449,13 +505,46 @@ async function androidBuild(request, deps) {
   const keyPassword = secret(request, deps, "ANDROID_UPLOAD_KEY_PASSWORD");
   await writeFile(propertiesPath, `${properties}\nAPP_UPLOAD_STORE_PASSWORD=${gradleProperty(storePassword)}\nAPP_UPLOAD_KEY_ALIAS=${gradleProperty(keyAlias)}\nAPP_UPLOAD_KEY_PASSWORD=${gradleProperty(keyPassword)}\n`, { mode: 0o600 });
   const gradle = deps.platform === "win32" ? "gradlew.bat" : "./gradlew";
-  await deps.runner(gradle, ["app:bundleRelease", "app:assembleRelease", "--no-daemon", "--max-workers=2", "-Dorg.gradle.parallel=false", "-Dorg.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8", "-Pkotlin.compiler.execution.strategy=in-process", `-PAPP_VERSION_CODE=${buildNumber}`, "-PreactNativeArchitectures=arm64-v8a", "-PAPP_UPLOAD_STORE_FILE=upload.jks"], { cwd: path.join(applicationRoot, "android") });
+  const tasks = options.includeBundle ? ["app:bundleRelease", "app:assembleRelease"] : ["app:assembleRelease"];
+  await deps.runner(gradle, [...tasks, "--no-daemon", "--max-workers=2", "-Dorg.gradle.parallel=false", "-Dorg.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8", "-Pkotlin.compiler.execution.strategy=in-process", `-PAPP_VERSION_CODE=${buildNumber}`, "-PreactNativeArchitectures=arm64-v8a", "-PAPP_UPLOAD_STORE_FILE=upload.jks"], { cwd: path.join(applicationRoot, "android"), timeoutMs: 30 * 60 * 1000 });
   const apkSource = path.join(applicationRoot, "android/app/build/outputs/apk/release/app-release.apk");
-  const aabSource = path.join(applicationRoot, "android/app/build/outputs/bundle/release/app-release.aab");
-  await Promise.all([assertFile(apkSource), assertFile(aabSource)]);
-  const artifactRoot = path.join(root, "artifacts"); await mkdir(artifactRoot, { recursive: true, mode: 0o700 });
-  const apk = path.join(artifactRoot, "camble.apk"); const aab = path.join(artifactRoot, "camble.aab");
-  await Promise.all([copyFile(apkSource, apk), copyFile(aabSource, aab)]);
+  await assertFile(apkSource);
+  const artifactRoot = path.join(root, "artifacts");
+  await mkdir(artifactRoot, { recursive: true, mode: 0o700 });
+  const apk = path.join(artifactRoot, options.apkFileName);
+  await copyFile(apkSource, apk);
+  await assertFile(apk);
+  let aab = null;
+  if (options.includeBundle) {
+    const aabSource = path.join(applicationRoot, "android/app/build/outputs/bundle/release/app-release.aab");
+    await assertFile(aabSource);
+    aab = path.join(artifactRoot, options.aabFileName);
+    await copyFile(aabSource, aab);
+  }
+  let signing = null;
+  if (options.verifySignature) {
+    const apksigner = await resolveApksigner(request, deps);
+    const verified = await deps.runner(apksigner, ["verify", "--verbose", "--print-certs", apk], { allowFailure: true, timeoutMs: 60_000, maxOutput: 256 * 1024 });
+    if (verified.code !== 0) fail("APK signature verification failed");
+    const certificate = /certificate SHA-256 digest:\s*([0-9a-f]{64})/i.exec(`${verified.stdout}\n${verified.stderr}`)?.[1]?.toLowerCase() ?? null;
+    signing = { verified: true, certificateSha256: certificate, verifier: "apksigner" };
+  }
+  const apkSha256 = await sha256File(apk);
+  if (options.immutable) await chmod(apk, 0o400);
+  return { root, applicationRoot, artifactRoot, apk, aab, apkSha256, signing, versionName, buildNumber: String(buildNumber), packageName };
+}
+async function androidBuild(request, deps) {
+  const input = inputs(request);
+  const dryRun = boolean(input.dryRun, true);
+  if (input.track !== undefined && input.track !== PLAY_TRACK) fail("Google Play track is fixed to internal");
+  const app = repository(request, "application3");
+  const backend = repository(request, "backend");
+  const [applicationSha, backendSha] = await Promise.all([exactRef(deps.runner, app, "dev"), exactRef(deps.runner, backend, "dev")]);
+  if (input.applicationSha !== undefined && input.applicationSha !== applicationSha) fail("application3:dev moved; refresh build data");
+  if (input.backendSha !== undefined && input.backendSha !== backendSha) fail("backend:dev moved; refresh build data");
+  if (dryRun) return ok("Planned application3 dev build", { dryRun, applicationSha, backendSha, verifiedBranch: "dev", storeTrack: PLAY_TRACK, steps: ["resolve current dev SHAs", "clone exact SHAs", "npm ci/preinit", "signed APK+AAB", "optional Google Play Internal upload"] });
+  const built = await buildSignedAndroid(request, deps, { directory: "android-build", applicationSha, backendSha, includeBundle: true, apkFileName: "camble.apk", aabFileName: "camble.aab", requirePackage: false, verifySignature: false, immutable: false });
+  const { root, applicationRoot, apk, aab, versionName, buildNumber } = built;
   let storeStatus = "skipped";
   const serviceAccount = secret(request, deps, "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON", false);
   if (serviceAccount) {
@@ -466,10 +555,456 @@ async function androidBuild(request, deps) {
     storeStatus = "uploaded";
   }
   const artifacts = [
-    { path: path.relative(root, apk), type: "apk", versionName, buildNumber: String(buildNumber) },
-    { path: path.relative(root, aab), type: "aab", versionName, buildNumber: String(buildNumber) },
+    { path: path.relative(root, apk), type: "apk", versionName, buildNumber },
+    { path: path.relative(root, aab), type: "aab", versionName, buildNumber },
   ];
-  return ok(`Built signed Camble Android ${versionName} (${buildNumber})`, { dryRun, applicationSha, backendSha, verifiedBranch: "dev", versionName, buildNumber: String(buildNumber), storeTrack: PLAY_TRACK, storeStatus }, artifacts);
+  return ok(`Built signed Camble Android ${versionName} (${buildNumber})`, { dryRun, applicationSha, backendSha, verifiedBranch: "dev", versionName, buildNumber, storeTrack: PLAY_TRACK, storeStatus }, artifacts);
+}
+
+function optionalText(value, label, maxLength) {
+  if (value === undefined) return null;
+  if (typeof value !== "string" || value.length > maxLength || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) fail(`Invalid ${label}`);
+  return value;
+}
+function testBranch(value, label) {
+  if (typeof value !== "string" || value.length < 1 || value.length > 255 || value.startsWith("-") || value.startsWith("/") || value.endsWith("/") || value.endsWith(".") || value.endsWith(".lock")
+    || /\.\.|@\{|[\\~^:?*\[\]\u0000-\u0020\u007f]/.test(value)
+    || value.split("/").some((part) => part === "" || part === "." || part === ".." || part.startsWith("."))) fail(`Invalid ${label}`);
+  return value;
+}
+function testActionInputs(request) {
+  const raw = request.input ?? request.inputs ?? {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) fail("Invalid input object");
+  for (const key of Object.keys(raw)) if (!TEST_INPUTS.has(key)) fail(`Unknown test input ${key}`);
+  if (!TEST_ENVIRONMENTS.has(raw.environment)) fail("Invalid test environment");
+  if (!Array.isArray(raw.targets) || raw.targets.length < 1 || raw.targets.length > TEST_TARGETS.length) fail("Select at least one test target");
+  if (new Set(raw.targets).size !== raw.targets.length || raw.targets.some((target) => !TEST_TARGETS.includes(target))) fail("Invalid test targets");
+  const targets = TEST_TARGETS.filter((target) => raw.targets.includes(target));
+  const declaredDeviceId = optionalText(raw["device-id"], "device id", 200);
+  const scheduledDeviceId = request.device?.id ?? request.device?.serial ?? request.deviceId ?? request.scheduler?.deviceId;
+  const deviceId = declaredDeviceId ?? scheduledDeviceId ?? null;
+  if (deviceId !== null && (typeof deviceId !== "string" || !DEVICE_ID.test(deviceId))) fail("Invalid device id");
+  const applicationBranch = testBranch(raw["application-branch"] ?? repository(request, "application3").defaultBranch ?? "dev", "application branch");
+  const backendBranch = testBranch(raw["backend-branch"] ?? repository(request, "backend").defaultBranch ?? "dev", "backend branch");
+  return {
+    environment: raw.environment,
+    targets,
+    deviceId,
+    comment: optionalText(raw.comment, "comment", 20_000),
+    applicationBranch,
+    backendBranch,
+  };
+}
+function lifecycleTimestamp(deps) { return new Date(deps.now()).toISOString(); }
+function conciseError(error) {
+  const value = error instanceof Error ? error.message : "Unknown test failure";
+  return value.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 2_000) || "Unknown test failure";
+}
+function relativeArtifactPath(root, file) { return path.relative(root, file).split(path.sep).join("/"); }
+function testStepDefinitions(targets) {
+  const definitions = [{ id: "resolve-sources", label: "Resolve immutable source SHAs", target: null }];
+  if (targets.some((target) => target === "Desktop" || target === "Chrome")) definitions.push({ id: "resolve-chrome", label: "Resolve Chrome/Chromium", target: null });
+  if (targets.includes("Android")) definitions.push({ id: "build-android", label: "Build and verify immutable signed APK", target: "Android" });
+  if (targets.includes("Desktop")) definitions.push({ id: "desktop", label: "Run Desktop HTTP, DOM and screenshot checks", target: "Desktop" });
+  if (targets.includes("Chrome")) definitions.push({ id: "chrome", label: "Run Chrome HTTP, DOM and screenshot checks", target: "Chrome" });
+  if (targets.includes("Android")) definitions.push(
+    { id: "resolve-device", label: "Resolve and ping Mobilerun device", target: "Android" },
+    { id: "install-android", label: "Deliver and install exact APK", target: "Android" },
+    { id: "mobile-chrome", label: "Test mobile Chrome deep link", target: "Android" },
+    { id: "installed-apk", label: "Test installed APK", target: "Android" },
+  );
+  return definitions.map((definition, index) => ({ order: index + 1, ...definition, status: "pending", startedAt: null, completedAt: null, evidence: null, error: null }));
+}
+async function emitTestProgress(deps, lifecycle, step) {
+  await deps.progress({
+    apiVersion: 1,
+    actionId: "test",
+    event: "step",
+    lifecycleStatus: lifecycle.status,
+    step: { order: step.order, id: step.id, label: step.label, target: step.target, status: step.status },
+    ...(step.error ? { error: step.error } : {}),
+  });
+}
+async function runTestStep(lifecycle, id, deps, operation) {
+  const step = lifecycle.steps.find((item) => item.id === id);
+  if (!step) fail(`Missing lifecycle step ${id}`);
+  step.status = "running";
+  step.startedAt = lifecycleTimestamp(deps);
+  if (step.target) lifecycle.targets.find((item) => item.target === step.target).status = "running";
+  await emitTestProgress(deps, lifecycle, step);
+  try {
+    const evidence = await operation();
+    step.status = "passed";
+    step.evidence = evidence ?? {};
+    lifecycle.evidence.push({ stepId: id, target: step.target, ...step.evidence });
+    step.completedAt = lifecycleTimestamp(deps);
+    await emitTestProgress(deps, lifecycle, step);
+    return evidence;
+  } catch (error) {
+    step.status = "failed";
+    step.error = { code: "STEP_FAILED", message: conciseError(error) };
+    step.completedAt = lifecycleTimestamp(deps);
+    lifecycle.errors.push({ stepId: id, target: step.target, ...step.error });
+    await emitTestProgress(deps, lifecycle, step);
+    throw error;
+  }
+}
+function finalizeTestLifecycle(lifecycle, passed, deps) {
+  for (const step of lifecycle.steps) {
+    if (step.status === "pending") {
+      step.status = "skipped";
+      step.error = passed ? null : { code: "NOT_RUN", message: "Skipped after an earlier terminal failure" };
+    }
+  }
+  for (const target of lifecycle.targets) {
+    const steps = lifecycle.steps.filter((step) => step.target === target.target);
+    target.status = steps.some((step) => step.status === "failed") ? "failed"
+      : steps.length > 0 && steps.every((step) => step.status === "passed") ? "passed"
+        : lifecycle.errors.some((error) => error.target === null) ? "failed" : "skipped";
+    target.stepIds = steps.map((step) => step.id);
+  }
+  lifecycle.status = passed ? "passed" : "failed";
+  lifecycle.completedAt = lifecycleTimestamp(deps);
+  lifecycle.verdict = lifecycle.status;
+  lifecycle.verdictEvidence = { evidence: lifecycle.evidence, errors: lifecycle.errors };
+}
+async function resolveChrome(request, deps) {
+  const candidates = [deps.chromePath, request.tools?.chrome, deps.environment.TEAMAI_CHROME_BIN];
+  if (deps.platform === "darwin") {
+    candidates.push("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Chromium.app/Contents/MacOS/Chromium");
+  } else if (deps.platform === "win32") {
+    for (const root of [deps.environment.PROGRAMFILES, deps.environment.LOCALAPPDATA]) {
+      if (root) candidates.push(path.join(root, "Google", "Chrome", "Application", "chrome.exe"));
+    }
+  } else {
+    candidates.push("google-chrome", "google-chrome-stable", "chromium", "chromium-browser");
+  }
+  for (const candidate of unique(candidates.filter((value) => typeof value === "string" && value.trim()).map((value) => value.trim()))) {
+    try {
+      const result = await deps.runner(candidate, ["--version"], { allowFailure: true, timeoutMs: 5_000, maxOutput: 64 * 1024 });
+      if (result.code === 0) return { executable: candidate, version: `${result.stdout}\n${result.stderr}`.trim().slice(0, 240) };
+    } catch {
+      // Continue through the bounded trusted candidate list.
+    }
+  }
+  fail("Google Chrome/Chromium executable not found");
+}
+async function withTimeout(promise, timeoutMs, message, controller = null) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => { timer = setTimeout(() => { controller?.abort(); reject(new PluginError(message)); }, timeoutMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function httpEvidence(deps, deepLink, environment) {
+  const controller = new AbortController();
+  const response = await withTimeout(deps.fetch(deepLink, { redirect: "follow", signal: controller.signal, headers: { Accept: "text/html" } }), 15_000, "HTTP check timed out", controller);
+  if (!response || typeof response.status !== "number" || response.status < 200 || response.status >= 300) fail(`HTTP check failed with status ${response?.status ?? "unknown"}`);
+  const finalUrl = response.url || deepLink;
+  let parsed;
+  try { parsed = new URL(finalUrl); } catch { fail("HTTP check returned an invalid final URL"); }
+  if (parsed.protocol !== "https:" || parsed.hostname !== environment || parsed.username || parsed.password) fail("HTTP check escaped the selected environment");
+  const contentType = response.headers?.get?.("content-type") ?? "";
+  if (!/^text\/html(?:;|$)/i.test(contentType)) fail("HTTP check did not return HTML");
+  const body = await withTimeout(response.text(), 15_000, "HTTP body check timed out", controller);
+  const bodyBytes = Buffer.byteLength(body ?? "", "utf8");
+  if (bodyBytes < 1 || bodyBytes > 2 * 1024 * 1024 || !/<(?:!doctype\s+html|html)\b/i.test(body) || !/<body\b/i.test(body)) fail("HTTP check returned an invalid HTML document");
+  return { status: response.status, finalUrl, contentType: contentType.slice(0, 160), bodyBytes, htmlDocument: true };
+}
+function titleFromDom(dom) {
+  return /<title[^>]*>([^<]{0,500})<\/title>/i.exec(dom)?.[1]?.trim() ?? null;
+}
+function chromeArguments(profile, viewport) {
+  return ["--headless=new", "--disable-gpu", "--disable-extensions", "--disable-component-update", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-sync", "--metrics-recording-only", `--window-size=${viewport}`, `--user-data-dir=${profile}`];
+}
+
+async function captureChromeWithRunner({ chrome, profile, screenshot, deepLink, viewport, deps }) {
+  const common = chromeArguments(profile, viewport).filter((argument) => !argument.startsWith("--user-data-dir="));
+  const domResult = await deps.runner(chrome.executable, [...common, `--user-data-dir=${path.join(profile, "dom")}`, "--virtual-time-budget=10000", "--dump-dom", deepLink], { allowFailure: true, timeoutMs: 30_000, maxOutput: 4 * 1024 * 1024 });
+  const dom = domResult.stdout;
+  await deps.runner(chrome.executable, [...common, `--user-data-dir=${path.join(profile, "screenshot")}`, "--virtual-time-budget=10000", `--screenshot=${screenshot}`, deepLink], { timeoutMs: 30_000, maxOutput: 256 * 1024 });
+  return { dom: domResult.code === 0 ? dom : "", finalUrl: deepLink };
+}
+
+async function waitForFile(file, deps, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try { return await readFile(file, "utf8"); } catch {}
+    await deps.sleep(100);
+  }
+  fail("Chrome DevTools endpoint did not start");
+}
+
+async function chromeDevToolsSession(webSocketUrl, timeoutMs) {
+  const socket = new WebSocket(webSocketUrl);
+  const pending = new Map();
+  let nextId = 0;
+  const opened = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new PluginError("Chrome DevTools connection timed out")), timeoutMs);
+    socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
+    socket.addEventListener("error", () => { clearTimeout(timer); reject(new PluginError("Chrome DevTools connection failed")); }, { once: true });
+  });
+  socket.addEventListener("message", (event) => {
+    let message;
+    try { message = JSON.parse(String(event.data)); } catch { return; }
+    if (!message.id || !pending.has(message.id)) return;
+    const item = pending.get(message.id);
+    pending.delete(message.id);
+    clearTimeout(item.timer);
+    if (message.error) item.reject(new PluginError(`Chrome DevTools ${message.error.message ?? "command failed"}`));
+    else item.resolve(message.result ?? {});
+  });
+  await opened;
+  return {
+    async call(method, params = {}) {
+      const id = ++nextId;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { pending.delete(id); reject(new PluginError(`Chrome DevTools ${method} timed out`)); }, timeoutMs);
+        pending.set(id, { resolve, reject, timer });
+        socket.send(JSON.stringify({ id, method, params }));
+      });
+    },
+    close() {
+      for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new PluginError("Chrome DevTools session closed")); }
+      pending.clear();
+      socket.close();
+    },
+  };
+}
+
+async function captureChromeCdp({ chrome, profile, screenshot, deepLink, viewport, deps }) {
+  const [width, height] = viewport.split(",").map(Number);
+  const args = [...chromeArguments(profile, viewport), "--remote-debugging-port=0", "about:blank"];
+  const child = spawn(chrome.executable, args, { env: subprocessEnvironment(deps.environment), stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { if (stderr.length < 64 * 1024) stderr += chunk.toString("utf8"); });
+  let session = null;
+  try {
+    const active = await waitForFile(path.join(profile, "DevToolsActivePort"), deps, 15_000);
+    const port = Number(active.split(/\r?\n/, 1)[0]);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) fail("Chrome returned an invalid DevTools port");
+    const pages = await withTimeout(globalThis.fetch(`http://127.0.0.1:${port}/json/list`).then((response) => response.json()), 5_000, "Chrome DevTools discovery timed out");
+    const page = Array.isArray(pages) ? pages.find((item) => item?.type === "page" && typeof item.webSocketDebuggerUrl === "string") : null;
+    if (!page) fail("Chrome DevTools page target was not found");
+    session = await chromeDevToolsSession(page.webSocketDebuggerUrl, 15_000);
+    await session.call("Page.enable");
+    await session.call("Runtime.enable");
+    await session.call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+    await session.call("Page.navigate", { url: deepLink });
+    const deadline = Date.now() + 45_000;
+    let document = null;
+    while (Date.now() < deadline) {
+      const evaluated = await session.call("Runtime.evaluate", { expression: `(() => {
+        const marker = globalThis.__CAMEE_APP_READY__;
+        const route = String(marker?.route || location.pathname || '').toLowerCase();
+        const loading = [...document.querySelectorAll('[class*="load" i], [id*="load" i]')].some((element) => {
+          const style = getComputedStyle(element); const rect = element.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+        });
+        const ready = Boolean(marker?.route) || (!loading && /(login|auth|guest|register|age-gate|random|feed|live)/.test(route));
+        const navigation = performance.getEntriesByType('navigation')[0];
+        return {ready,route,readyState:document.readyState,html:document.documentElement?.outerHTML||'',title:document.title,url:location.href,status:navigation?.responseStatus||0,contentType:document.contentType||''};
+      })()`, returnByValue: true });
+      const value = evaluated?.result?.value;
+      if (value?.ready === true && value.readyState === "complete" && typeof value.html === "string" && /<body\b/i.test(value.html)) { document = value; break; }
+      await deps.sleep(250);
+    }
+    if (!document) fail("Chrome page did not report an application-ready route");
+    if (/(?:chrome-error:\/\/|ERR_[A-Z_]+|This site can['’]t be reached)/i.test(document.url + "\n" + document.html)) fail("Browser DOM check failed");
+    const captured = await session.call("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false });
+    if (typeof captured.data !== "string" || captured.data.length < 100) fail("Chrome did not return screenshot evidence");
+    await writeFile(screenshot, Buffer.from(captured.data, "base64"), { mode: 0o600 });
+    if (!Number.isFinite(document.status) || document.status < 200 || document.status >= 300) fail(`Chrome navigation failed with status ${document.status || "unknown"}`);
+    return { dom: document.html, finalUrl: document.url, http: { status: document.status, finalUrl: document.url, contentType: String(document.contentType).slice(0, 160), bodyBytes: Buffer.byteLength(document.html, "utf8"), htmlDocument: true, source: "chrome-navigation" } };
+  } catch (error) {
+    if (error instanceof PluginError) throw error;
+    throw new PluginError(`Chrome DevTools test failed: ${conciseError(error)}${stderr ? ` (${stderr.slice(-300)})` : ""}`);
+  } finally {
+    session?.close();
+    child.kill("SIGKILL");
+  }
+}
+
+async function captureBrowserTarget(request, deps, lifecycle, artifacts, chrome, target, deepLink) {
+  const root = workspace(request);
+  const targetSlug = target.toLowerCase();
+  const profile = path.join(root, "browser-profiles", targetSlug);
+  const screenshot = path.join(root, "artifacts", `${targetSlug}-${lifecycle.environment}.png`);
+  await Promise.all([mkdir(profile, { recursive: true, mode: 0o700 }), mkdir(path.dirname(screenshot), { recursive: true, mode: 0o700 })]);
+  const viewport = target === "Desktop" ? "1440,1000" : "1280,800";
+  const captured = await deps.browserCapture({ chrome, profile, screenshot, deepLink, viewport, deps });
+  const dom = captured.dom;
+  if (!/<html\b/i.test(dom) || !/<body\b/i.test(dom) || /(?:chrome-error:\/\/|ERR_[A-Z_]+|This site can['’]t be reached)/i.test(dom)) fail(`${target} DOM check failed`);
+  const finalUrl = new URL(captured.finalUrl ?? deepLink);
+  if (finalUrl.protocol !== "https:" || finalUrl.hostname !== lifecycle.environment) fail(`${target} browser escaped the selected environment`);
+  let http = captured.http ?? deps.httpEvidenceCache.get(deepLink);
+  if (!http) {
+    http = await httpEvidence(deps, deepLink, lifecycle.environment);
+    deps.httpEvidenceCache.set(deepLink, http);
+  }
+  await assertFile(screenshot);
+  const screenshotSha256 = await sha256File(screenshot);
+  const relative = relativeArtifactPath(root, screenshot);
+  artifacts.push({ path: relative, type: "screenshot" });
+  lifecycle.screenshots.push({ target, kind: "browser", path: relative, sha256: screenshotSha256 });
+  return { http, dom: { htmlDocument: true, bytes: Buffer.byteLength(dom, "utf8"), title: titleFromDom(dom), finalUrl: finalUrl.href }, screenshot: { path: relative, sha256: screenshotSha256 } };
+}
+function parseMobilerunDevices(output) {
+  const stripped = String(output ?? "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+  const found = [];
+  for (const line of stripped.split(/\r?\n/)) {
+    const match = /^\s*[•*]\s+([^\s]+)/.exec(line);
+    if (match && DEVICE_ID.test(match[1])) found.push(match[1]);
+  }
+  return unique(found);
+}
+async function resolveMobilerun(request, deps, requestedDeviceId) {
+  const executable = await executableCandidate(deps.runner, [deps.mobilerunPath, request.tools?.mobilerun, "mobilerun"], ["--version"], "Mobilerun");
+  const listed = await deps.runner(executable, ["devices"], { allowFailure: true, timeoutMs: 20_000, maxOutput: 256 * 1024 });
+  if (listed.code !== 0) fail("Mobilerun device discovery failed");
+  const devices = parseMobilerunDevices(listed.stdout);
+  const deviceId = requestedDeviceId ?? (devices.length === 1 ? devices[0] : null);
+  if (!deviceId) fail(devices.length === 0 ? "No Mobilerun device available" : "Multiple Mobilerun devices are available; select device-id");
+  if (!devices.includes(deviceId)) fail(`Mobilerun device ${deviceId} is not in the fresh device list`);
+  const ping = await deps.runner(executable, ["ping", "-d", deviceId], { allowFailure: true, timeoutMs: 20_000, maxOutput: 256 * 1024 });
+  if (ping.code !== 0) fail(`Mobilerun device ${deviceId} is unavailable`);
+  return { executable, deviceId, discoveredDevices: devices.length };
+}
+async function mobilerunCommand(mobile, deps, args, label, timeoutMs = 30_000) {
+  const result = await deps.runner(mobile.executable, args, { allowFailure: true, timeoutMs, maxOutput: 512 * 1024 });
+  if (result.code !== 0) fail(`Mobilerun ${label} failed`);
+  return result;
+}
+async function captureMobileScreenshot(request, deps, lifecycle, artifacts, mobile, kind) {
+  const captured = await mobilerunCommand(mobile, deps, ["device", "screenshot", "-d", mobile.deviceId], `${kind} screenshot`);
+  const returned = captured.stdout.trim().split(/\r?\n/).filter(Boolean).at(-1)?.trim();
+  if (!returned) fail("Mobilerun did not return a screenshot path");
+  const source = path.isAbsolute(returned) ? returned : path.resolve(workspace(request), returned);
+  const sourceStat = await stat(source).catch(() => null);
+  if (!sourceStat?.isFile() || sourceStat.size < 1 || sourceStat.size > 20 * 1024 * 1024 || path.extname(source).toLowerCase() !== ".png") fail("Mobilerun returned an invalid screenshot");
+  const destination = path.join(workspace(request), "artifacts", `android-${kind}-${lifecycle.environment}.png`);
+  await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+  await copyFile(source, destination);
+  const sha256 = await sha256File(destination);
+  const relative = relativeArtifactPath(workspace(request), destination);
+  artifacts.push({ path: relative, type: "screenshot" });
+  lifecycle.screenshots.push({ target: "Android", kind, path: relative, sha256 });
+  return { path: relative, sha256 };
+}
+async function cambleTest(request, deps) {
+  const input = testActionInputs(request);
+  const deepLink = `https://${input.environment}/?env=${encodeURIComponent(input.environment)}`;
+  const lifecycle = {
+    lifecycleVersion: 1,
+    environment: input.environment,
+    deepLink,
+    comment: input.comment,
+    requestedDeviceId: input.deviceId,
+    sourceBranches: { application: input.applicationBranch, backend: input.backendBranch },
+    status: "running",
+    startedAt: lifecycleTimestamp(deps),
+    completedAt: null,
+    steps: testStepDefinitions(input.targets),
+    targets: input.targets.map((target) => ({ target, status: "pending", stepIds: [] })),
+    provenance: { application: null, backend: null, androidArtifact: null },
+    screenshots: [],
+    evidence: [],
+    errors: [],
+    verdict: null,
+    verdictEvidence: null,
+  };
+  const artifacts = [];
+  let chrome = null;
+  let built = null;
+  let mobile = null;
+  try {
+    await runTestStep(lifecycle, "resolve-sources", deps, async () => {
+      const [applicationSha, backendSha] = await Promise.all([
+        exactRef(deps.runner, repository(request, "application3"), input.applicationBranch),
+        exactRef(deps.runner, repository(request, "backend"), input.backendBranch),
+      ]);
+      lifecycle.provenance.application = { repository: "application3", branch: input.applicationBranch, sha: applicationSha };
+      lifecycle.provenance.backend = { repository: "backend", branch: input.backendBranch, sha: backendSha };
+      return { applicationSha, backendSha };
+    });
+    if (input.targets.some((target) => target === "Desktop" || target === "Chrome")) {
+      chrome = await runTestStep(lifecycle, "resolve-chrome", deps, async () => resolveChrome(request, deps));
+    }
+    if (input.targets.includes("Android")) {
+      await runTestStep(lifecycle, "build-android", deps, async () => {
+        const applicationSha = lifecycle.provenance.application.sha;
+        const backendSha = lifecycle.provenance.backend.sha;
+        const result = await buildSignedAndroid(request, deps, {
+          directory: "chat-test-android",
+          applicationSha,
+          backendSha,
+          includeBundle: false,
+          apkFileName: `camble-${applicationSha}-${backendSha}.apk`,
+          requirePackage: true,
+          verifySignature: true,
+          immutable: true,
+        });
+        built = result;
+        const relative = relativeArtifactPath(result.root, result.apk);
+        artifacts.push({ path: relative, type: "apk", versionName: result.versionName, buildNumber: result.buildNumber });
+        lifecycle.provenance.androidArtifact = {
+          path: relative,
+          sha256: result.apkSha256,
+          immutable: true,
+          signed: result.signing,
+          versionName: result.versionName,
+          buildNumber: result.buildNumber,
+          packageName: result.packageName,
+          applicationSha,
+          backendSha,
+        };
+        return lifecycle.provenance.androidArtifact;
+      });
+    }
+    if (input.targets.includes("Desktop")) {
+      await runTestStep(lifecycle, "desktop", deps, async () => captureBrowserTarget(request, deps, lifecycle, artifacts, chrome, "Desktop", deepLink));
+    }
+    if (input.targets.includes("Chrome")) {
+      await runTestStep(lifecycle, "chrome", deps, async () => captureBrowserTarget(request, deps, lifecycle, artifacts, chrome, "Chrome", deepLink));
+    }
+    if (input.targets.includes("Android")) {
+      await runTestStep(lifecycle, "resolve-device", deps, async () => {
+        const result = await resolveMobilerun(request, deps, input.deviceId);
+        mobile = result;
+        return { deviceId: result.deviceId, discoveredDevices: result.discoveredDevices, executable: path.basename(result.executable) };
+      });
+      await runTestStep(lifecycle, "install-android", deps, async () => {
+        await mobilerunCommand(mobile, deps, ["device", "install", "-d", mobile.deviceId, built.apk], "APK install", 2 * 60_000);
+        const apps = await mobilerunCommand(mobile, deps, ["device", "apps", "-d", mobile.deviceId], "installed-app verification");
+        const installed = apps.stdout.split(/\r?\n/).some((line) => line.trim().split(/\s+/, 1)[0] === built.packageName);
+        if (!installed) fail(`Installed APK package ${built.packageName} was not reported by Mobilerun`);
+        return { deviceId: mobile.deviceId, packageName: built.packageName, artifactSha256: built.apkSha256, installed: true };
+      });
+      await runTestStep(lifecycle, "mobile-chrome", deps, async () => {
+        await mobilerunCommand(mobile, deps, ["device", "open-url", "-d", mobile.deviceId, deepLink], "mobile Chrome deep-link test", 60_000);
+        const ui = await mobilerunCommand(mobile, deps, ["device", "ui", "-d", mobile.deviceId], "mobile Chrome UI verification");
+        if (!ui.stdout.toLowerCase().includes(input.environment.toLowerCase())) fail("Mobile Chrome UI did not prove the selected deep-link environment");
+        const screenshot = await captureMobileScreenshot(request, deps, lifecycle, artifacts, mobile, "chrome");
+        return { deviceId: mobile.deviceId, deepLink, environmentVisible: true, screenshot };
+      });
+      await runTestStep(lifecycle, "installed-apk", deps, async () => {
+        await mobilerunCommand(mobile, deps, ["device", "start", "-d", mobile.deviceId, built.packageName], "APK launch");
+        const ui = await mobilerunCommand(mobile, deps, ["device", "ui", "-d", mobile.deviceId], "APK UI verification");
+        if (!ui.stdout.trim()) fail("Installed APK returned an empty UI tree");
+        const screenshot = await captureMobileScreenshot(request, deps, lifecycle, artifacts, mobile, "apk");
+        return { deviceId: mobile.deviceId, packageName: built.packageName, launched: true, uiTreePresent: true, screenshot };
+      });
+    }
+    finalizeTestLifecycle(lifecycle, true, deps);
+    return ok(`Camble chat test passed for ${input.targets.join(", ")}`, lifecycle, artifacts);
+  } catch (error) {
+    finalizeTestLifecycle(lifecycle, false, deps);
+    throw new PluginError(`Camble chat test failed: ${conciseError(error)}`, lifecycle, artifacts);
+  }
 }
 
 async function clusterPlan(request, deps) {
@@ -839,8 +1374,21 @@ export async function execute(request, overrides = {}) {
   if (!request || request.apiVersion !== 1) fail("Unsupported request apiVersion");
   const platform = overrides.platform ?? process.platform;
   const environment = overrides.environment ?? process.env;
-  const deps = { runner: overrides.runner ?? createCommandRunner({ platform, environment }), fetch: overrides.fetch ?? globalThis.fetch, sleep: overrides.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))), now: overrides.now ?? Date.now, platform, environment };
-  const handlers = { collect, promote, "version-inspect": versionInspect, "version-apply": versionApply, "android-build": androidBuild, "cluster-observe": clusterObserve, "cluster-logs": clusterLogs, "cluster-deploy": clusterDeploy };
+  const deps = {
+    runner: overrides.runner ?? createCommandRunner({ platform, environment }),
+    fetch: overrides.fetch ?? globalThis.fetch,
+    sleep: overrides.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+    now: overrides.now ?? Date.now,
+    progress: overrides.progress ?? (async () => {}),
+    browserCapture: overrides.browserCapture ?? (overrides.runner ? captureChromeWithRunner : captureChromeCdp),
+    httpEvidenceCache: new Map(),
+    chromePath: overrides.chromePath,
+    mobilerunPath: overrides.mobilerunPath,
+    apksignerPath: overrides.apksignerPath,
+    platform,
+    environment,
+  };
+  const handlers = { collect, promote, "version-inspect": versionInspect, "version-apply": versionApply, "android-build": androidBuild, test: cambleTest, "cluster-observe": clusterObserve, "cluster-logs": clusterLogs, "cluster-deploy": clusterDeploy };
   const id = actionId(request); const handler = handlers[id];
   if (!handler) fail(`Unknown action ${id}`);
   return handler(request, deps);
@@ -894,12 +1442,20 @@ export async function executeContract(request, overrides = {}) {
   return { response, exitCode: response.status === "ok" ? 0 : 1 };
 }
 
+export function createProgressReporter(request, environment, stream) {
+  const secrets = knownSecretValues(request, environment);
+  return async (event) => {
+    const safe = redactResponse(event, secrets);
+    stream.write(`TEAMAI_PROGRESS ${JSON.stringify(safe)}\n`);
+  };
+}
+
 async function main() {
   try {
     let raw = "";
     for await (const chunk of process.stdin) { raw += chunk; if (raw.length > 1024 * 1024) fail("Request exceeds limit"); }
     const request = JSON.parse(raw);
-    const result = await executeContract(request);
+    const result = await executeContract(request, { progress: createProgressReporter(request, process.env, process.stderr) });
     process.stdout.write(`${JSON.stringify(result.response)}\n`);
     process.exitCode = result.exitCode;
   } catch (error) {
