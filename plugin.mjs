@@ -1086,17 +1086,69 @@ async function captureMobileScreenshot(request, deps, lifecycle, artifacts, mobi
 
 const CAMBLE_MOBILERUN_SECRET_IDS = ["CAMBLE_TEST_EMAIL", "CAMBLE_TEST_PASSWORD"];
 
+function yamlCredentialValue(value) {
+  const trimmed = value.trim();
+  if (!trimmed || new Set(["|", ">", "null", "~"]).has(trimmed)) return null;
+  if (trimmed.startsWith('"')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      return typeof parsed === "string" && parsed ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  if (trimmed.startsWith("'") && trimmed.endsWith("'")) return trimmed.slice(1, -1).replace(/''/g, "'") || null;
+  return trimmed;
+}
+
+function mobilerunCredentialValues(contents) {
+  const values = new Map();
+  let activeId = null;
+  for (const line of contents.split(/\r?\n/)) {
+    const id = /^\s+(CAMBLE_TEST_EMAIL|CAMBLE_TEST_PASSWORD):\s*$/.exec(line);
+    if (id) {
+      activeId = id[1];
+      continue;
+    }
+    const value = /^\s+value:\s*(.+)$/.exec(line);
+    if (activeId && value) {
+      const parsed = yamlCredentialValue(value[1]);
+      if (parsed) values.set(activeId, parsed);
+    }
+  }
+  return values;
+}
+
+function redactMobilerunTerminalText(value, secretValues) {
+  let redacted = String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 2_000);
+  for (const secret of [...secretValues].sort((left, right) => right.length - left.length)) {
+    if (secret) redacted = redacted.split(secret).join("[REDACTED]");
+  }
+  return redacted;
+}
+
 async function secureMobilerunCaseConfig(deps) {
   const home = deps.environment.HOME ?? deps.environment.USERPROFILE;
   if (typeof home !== "string" || !path.isAbsolute(home)) fail("Mobilerun test home is unavailable");
   const config = path.join(home, ".teamai", "camble-mobilerun-config.yaml");
+  const credentials = path.join(home, ".teamai", "camble-mobilerun-credentials.yaml");
   const trajectoryRoot = path.join(home, ".teamai", "camble-mobilerun-trajectories");
-  const [configStat, trajectoryStat] = await Promise.all([stat(config).catch(() => null), stat(trajectoryRoot).catch(() => null)]);
+  const [configStat, credentialStat, trajectoryStat] = await Promise.all([
+    stat(config).catch(() => null),
+    stat(credentials).catch(() => null),
+    stat(trajectoryRoot).catch(() => null),
+  ]);
   if (!configStat?.isFile() || configStat.size < 1 || configStat.size > 1024 * 1024 || (configStat.mode & 0o077) !== 0) {
     fail("Secure Mobilerun test config is missing or has unsafe permissions");
   }
+  if (!credentialStat?.isFile() || credentialStat.size < 1 || credentialStat.size > 1024 * 1024 || (credentialStat.mode & 0o077) !== 0) {
+    fail("Secure Mobilerun credential file is missing or has unsafe permissions");
+  }
   if (!trajectoryStat?.isDirectory()) fail("Mobilerun trajectory directory is unavailable");
-  return { config, trajectoryRoot };
+  const credentialsById = mobilerunCredentialValues(await readFile(credentials, "utf8"));
+  if (CAMBLE_MOBILERUN_SECRET_IDS.some((id) => !credentialsById.has(id))) fail("Secure Mobilerun test credentials are incomplete");
+  const secretValues = [...credentialsById.values()];
+  return { config, trajectoryRoot, redactText: (value) => redactMobilerunTerminalText(value, secretValues) };
 }
 
 async function trajectoryDirectories(root) {
@@ -1173,8 +1225,9 @@ function mobilerunTerminalVerdict(trajectory) {
   const terminal = [...trajectory].reverse().find((event) => event && typeof event === "object"
     && new Set(["ManagerPlanDetailsEvent", "ResultEvent"]).has(event.type));
   if (!terminal || typeof terminal.success !== "boolean") return null;
-  const answer = typeof terminal.answer === "string"
-    ? terminal.answer.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 2_000)
+  const terminalText = typeof terminal.answer === "string" ? terminal.answer : terminal.reason;
+  const answer = typeof terminalText === "string"
+    ? terminalText.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 2_000)
     : "";
   return { type: terminal.type, success: terminal.success, answer };
 }
@@ -1362,14 +1415,17 @@ async function cambleTest(request, deps) {
         ], { allowFailure: true, timeoutMs: 20 * 60_000, maxOutput: 2 * 1024 * 1024 });
         const directory = await newMobilerunTrajectory(secure.trajectoryRoot, before, deps);
         trajectoryEvidence = await collectMobilerunTrajectory(directory);
-        const terminalVerdict = await collectMobilerunTerminalVerdict(directory);
+        const rawTerminalVerdict = await collectMobilerunTerminalVerdict(directory);
+        const terminalVerdict = rawTerminalVerdict
+          ? { ...rawTerminalVerdict, answer: secure.redactText(rawTerminalVerdict.answer) }
+          : null;
         const evidence = {
           deviceId: mobile.deviceId,
           packageName: built.packageName,
           mode: "reasoning",
           vision: true,
           maxSteps: 80,
-          authenticatedWithCredentialIds: CAMBLE_MOBILERUN_SECRET_IDS,
+          attemptedCredentialIds: trajectoryEvidence.secretIds,
           selectedEnvironment: input.environment,
           runtimeHost: expectedHost,
           runtimeHostProof: {
@@ -1392,6 +1448,7 @@ async function cambleTest(request, deps) {
         if (CAMBLE_MOBILERUN_SECRET_IDS.some((id) => !trajectoryEvidence.secretIds.includes(id))) {
           failWithStepEvidence("Mobilerun trajectory does not prove use of the configured test account", evidence);
         }
+        evidence.authenticatedWithCredentialIds = CAMBLE_MOBILERUN_SECRET_IDS;
         return evidence;
       });
       await runTestStep(lifecycle, "verify-mobile-case", deps, async () => {

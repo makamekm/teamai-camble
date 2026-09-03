@@ -720,6 +720,16 @@ async function prepareMobilerunCaseHome(workspace) {
   const trajectoryRoot = path.join(teamai, "camble-mobilerun-trajectories");
   await mkdir(trajectoryRoot, { recursive: true });
   await writeFile(path.join(teamai, "camble-mobilerun-config.yaml"), "credentials:\n  enabled: true\n", { mode: 0o600 });
+  await writeFile(path.join(teamai, "camble-mobilerun-credentials.yaml"), [
+    "secrets:",
+    "  CAMBLE_TEST_EMAIL:",
+    '    value: "qa-existing@example.com"',
+    "    enabled: true",
+    "  CAMBLE_TEST_PASSWORD:",
+    '    value: "test-password-value"',
+    "    enabled: true",
+    "",
+  ].join("\n"), { mode: 0o600 });
   return { HOME: home };
 }
 
@@ -810,7 +820,7 @@ function androidTestRunner(workspace, options = {}) {
                 ? { type: "ManagerPlanDetailsEvent", success: false, answer: "The target profile could not be reached." }
                 : options.failure === "terminal-missing"
                   ? { type: "ManagerPlanDetailsEvent", success: null, answer: "" }
-                  : { type: "ResultEvent", success: options.failure !== "thinking", answer: options.failure === "thinking" ? "The autonomous case failed." : "" };
+                  : { type: "ResultEvent", success: options.failure !== "thinking", reason: options.failure === "thinking" ? "The autonomous case failed for qa-existing@example.com with test-password-value." : "" };
             const trajectory = options.failure === "terminal-missing"
               ? [{ type: "ResultEvent", success: true, answer: "Premature result" }, terminal]
               : [terminal];
@@ -1032,6 +1042,10 @@ test("Android fails terminally when credentials, signing, device, Mobilerun or t
       assert.equal(evidence.trajectory.screenshotEvidence.length, 4, `${fixture.failure} must retain screenshot hashes`);
       assert.ok(evidence.trajectory.evidenceFiles.every((item) => /^[0-9a-f]{64}$/.test(item.sha256)));
       assert.ok(evidence.trajectory.screenshotEvidence.every((item) => /^[0-9a-f]{64}$/.test(item.sha256)));
+      assert.equal("authenticatedWithCredentialIds" in evidence, false, `${fixture.failure} must not claim successful authentication`);
+      assert.deepEqual(evidence.attemptedCredentialIds, evidence.trajectory.secretIds, `${fixture.failure} must report only observed secret actions`);
+      assert.equal(JSON.stringify(evidence).includes("qa-existing@example.com"), false, `${fixture.failure} evidence must redact the email`);
+      assert.equal(JSON.stringify(evidence).includes("test-password-value"), false, `${fixture.failure} evidence must redact the password`);
     }
     assert.equal(result.exitCode, 1, fixture.failure);
   }
