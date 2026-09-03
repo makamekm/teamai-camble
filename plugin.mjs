@@ -876,6 +876,14 @@ async function resolveMobilerun(request, deps, requestedDeviceId) {
   if (ping.code !== 0) fail(`Mobilerun device ${deviceId} is unavailable`);
   return { executable, deviceId, discoveredDevices: devices.length };
 }
+async function resolveAdb(request, deps) {
+  const candidates = [deps.adbPath, request.tools?.adb];
+  for (const root of [request.tools?.android, deps.environment.ANDROID_SDK_ROOT, deps.environment.ANDROID_HOME]) {
+    if (typeof root === "string" && path.isAbsolute(root)) candidates.push(path.join(root, "platform-tools", deps.platform === "win32" ? "adb.exe" : "adb"));
+  }
+  candidates.push(deps.platform === "win32" ? "adb.exe" : "adb");
+  return executableCandidate(deps.runner, candidates, ["version"], "Android adb");
+}
 async function mobilerunCommand(mobile, deps, args, label, timeoutMs = 30_000) {
   const result = await deps.runner(mobile.executable, args, { allowFailure: true, timeoutMs, maxOutput: 512 * 1024 });
   if (result.code !== 0) fail(`Mobilerun ${label} failed`);
@@ -1077,6 +1085,7 @@ async function cambleTest(request, deps) {
   const artifacts = [];
   let built = null;
   let mobile = null;
+  let adb = null;
   let trajectoryEvidence = null;
   try {
     await runTestStep(lifecycle, "resolve-sources", deps, async () => {
@@ -1104,7 +1113,6 @@ async function cambleTest(request, deps) {
         });
         built = result;
         const relative = relativeArtifactPath(result.root, result.apk);
-        artifacts.push({ path: relative, type: "apk", versionName: result.versionName, buildNumber: result.buildNumber });
         lifecycle.provenance.androidArtifact = {
           path: relative,
           sha256: result.apkSha256,
@@ -1126,11 +1134,15 @@ async function cambleTest(request, deps) {
         return { deviceId: result.deviceId, discoveredDevices: result.discoveredDevices, executable: path.basename(result.executable) };
       });
       await runTestStep(lifecycle, "install-android", deps, async () => {
-        await mobilerunCommand(mobile, deps, ["device", "install", "-d", mobile.deviceId, built.apk], "APK install", 2 * 60_000);
-        const apps = await mobilerunCommand(mobile, deps, ["device", "apps", "-d", mobile.deviceId], "installed-app verification");
-        const installed = apps.stdout.split(/\r?\n/).some((line) => line.trim().split(/\s+/, 1)[0] === built.packageName);
-        if (!installed) fail(`Installed APK package ${built.packageName} was not reported by Mobilerun`);
-        return { deviceId: mobile.deviceId, packageName: built.packageName, artifactSha256: built.apkSha256, installed: true };
+        adb = await resolveAdb(request, deps);
+        const installed = await deps.runner(adb, ["-s", mobile.deviceId, "install", "-r", built.apk], { allowFailure: true, timeoutMs: 3 * 60_000, maxOutput: 512 * 1024 });
+        if (installed.code !== 0) fail("ADB failed to install the exact Chat Test APK");
+        const details = await deps.runner(adb, ["-s", mobile.deviceId, "shell", "dumpsys", "package", built.packageName], { allowFailure: true, timeoutMs: 30_000, maxOutput: 2 * 1024 * 1024 });
+        if (details.code !== 0 || !new RegExp(`versionName=${built.versionName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`).test(details.stdout)
+          || !new RegExp(`versionCode=${built.buildNumber}(?:\\s|$)`).test(details.stdout)) {
+          fail(`Installed APK package ${built.packageName} did not match the built version`);
+        }
+        return { deviceId: mobile.deviceId, packageName: built.packageName, versionName: built.versionName, buildNumber: built.buildNumber, artifactSha256: built.apkSha256, installed: true, installer: path.basename(adb) };
       });
       await runTestStep(lifecycle, "mobilerun-thinking", deps, async () => {
         const secure = await secureMobilerunCaseConfig(deps);
@@ -1566,6 +1578,7 @@ export async function execute(request, overrides = {}) {
     mobilerunPath: overrides.mobilerunPath,
     apksignerPath: overrides.apksignerPath,
     rustupPath: overrides.rustupPath,
+    adbPath: overrides.adbPath,
     platform,
     environment,
   };

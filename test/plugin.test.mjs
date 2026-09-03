@@ -715,6 +715,11 @@ function androidTestRunner(workspace, options = {}) {
         if (args[0] === "--version") return { code: 0, stdout: "rustup 1.29.0\n", stderr: "" };
         return { code: options.failure === "rust-toolchain" ? 1 : 0, stdout: "stable-test (default)\n", stderr: "" };
       }
+      if (command === "adb") {
+        if (args[0] === "version") return { code: 0, stdout: "Android Debug Bridge version 1.0.41\n", stderr: "" };
+        if (args.includes("install")) return { code: options.failure === "install" ? 1 : 0, stdout: "Success\n", stderr: "" };
+        if (args.includes("dumpsys")) return { code: 0, stdout: options.failure === "version" ? "versionCode=72 versionName=5.1.0\n" : "versionCode=73 minSdk=26 targetSdk=36\nversionName=5.2.0-test.1\n", stderr: "" };
+      }
       if (command === "mobilerun") {
         if (args[0] === "--version") return { code: 0, stdout: "mobilerun 1.0\n", stderr: "" };
         if (args[0] === "devices") return { code: 0, stdout: options.failure === "device" ? "No local devices connected.\n" : "Found 1 local device(s):\n  • DEVICE-1\n", stderr: "" };
@@ -859,13 +864,15 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   assert.equal(apk.backendSha, D);
   assert.equal((await stat(path.join(workspace, apk.path))).mode & 0o777, 0o400);
   assert.equal((await readFile(path.join(workspace, apk.path), "utf8")), "signed-apk-content");
-  assert.equal(result.artifacts[0].type, "apk");
+  assert.equal(result.artifacts.some((item) => item.type === "apk"), false, "Chat Test must not upload its large transient APK");
   assert.equal(result.artifacts.filter((item) => item.type === "test-evidence").length, 2);
   assert.equal(result.artifacts.filter((item) => item.type === "screenshot").length, 9);
   assert.equal(result.output.screenshots.length, 9);
   assert.ok(result.output.screenshots.every((item) => /^[0-9a-f]{64}$/.test(item.sha256)));
   const mobileCalls = runner.calls.filter((call) => call.command === "mobilerun");
-  assert.deepEqual(mobileCalls.slice(0, 8).map((call) => call.args.slice(0, 2).join(" ")), ["--version", "devices", "ping -d", "device install", "device apps", "device start", "device screenshot", "run -c"]);
+  assert.deepEqual(mobileCalls.slice(0, 6).map((call) => call.args.slice(0, 2).join(" ")), ["--version", "devices", "ping -d", "device start", "device screenshot", "run -c"]);
+  const adbCalls = runner.calls.filter((call) => call.command === "adb");
+  assert.deepEqual(adbCalls.map((call) => call.args.includes("install") ? "install" : call.args.includes("dumpsys") ? "verify-package" : "version"), ["version", "install", "verify-package"]);
   assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "tap").length, 3);
   assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "press").length, 2);
   assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "ui").length, 6);
@@ -895,8 +902,8 @@ test("Android fails terminally when credentials, signing, device, Mobilerun or t
     { failure: "apksigner", step: "build-android", message: /apksigner executable not found/ },
     { failure: "signature", step: "build-android", message: /signature verification failed/ },
     { failure: "device", step: "resolve-device", message: /not in the fresh device list/ },
-    { failure: "install", step: "install-android", message: /APK install failed/ },
-    { failure: "apps", step: "install-android", message: /was not reported/ },
+    { failure: "install", step: "install-android", message: /ADB failed to install/ },
+    { failure: "version", step: "install-android", message: /did not match the built version/ },
     { failure: "credential-evidence", step: "mobilerun-thinking", message: /does not prove use of the configured test account/ },
     { failure: "thinking", step: "mobilerun-thinking", message: /did not complete successfully/ },
     { failure: "apk-ui", step: "verify-mobile-case", message: /empty UI tree/ },
@@ -915,10 +922,10 @@ test("Android fails terminally when credentials, signing, device, Mobilerun or t
     assert.equal(result.response.output.status, "failed", fixture.failure);
     assert.equal(result.response.output.steps.find((item) => item.id === fixture.step).status, "failed", fixture.failure);
     assert.equal(result.response.output.verdict, "failed", fixture.failure);
-    if (["credentials", "rust-toolchain", "apksigner", "signature"].includes(fixture.failure)) {
+    if (["credentials", "rust-toolchain", "apksigner", "signature", "device", "install", "version"].includes(fixture.failure)) {
       assert.equal(result.response.artifacts.length, 0, fixture.failure);
     } else {
-      assert.equal(result.response.artifacts[0]?.type, "apk", `${fixture.failure} must retain immutable APK evidence`);
+      assert.equal(result.response.artifacts[0]?.type, "screenshot", `${fixture.failure} must retain already-captured screenshot evidence`);
     }
     assert.equal(result.exitCode, 1, fixture.failure);
   }
