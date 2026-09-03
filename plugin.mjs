@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { chmod, mkdir, readFile, readdir, writeFile, copyFile, stat } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, writeFile, copyFile, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -536,8 +536,11 @@ async function buildSignedAndroid(request, deps, options) {
     signing = { verified: true, certificateSha256: certificate, verifier: "apksigner" };
   }
   const apkSha256 = await sha256File(apk);
+  const testHostArtifact = options.testEnvironment
+    ? await proveAndroidTestHostArtifact(apk, options.testEnvironment)
+    : null;
   if (options.immutable) await chmod(apk, 0o400);
-  return { root, applicationRoot, artifactRoot, apk, aab, apkSha256, signing, versionName, buildNumber: String(buildNumber), packageName, testHostOverlay };
+  return { root, applicationRoot, artifactRoot, apk, aab, apkSha256, signing, versionName, buildNumber: String(buildNumber), packageName, testHostOverlay, testHostArtifact };
 }
 async function androidBuild(request, deps) {
   const input = inputs(request);
@@ -610,6 +613,34 @@ function conciseError(error) {
 }
 function relativeArtifactPath(root, file) { return path.relative(root, file).split(path.sep).join("/"); }
 function nativeTestHost(environment) { return `https://${environment}`; }
+const ANDROID_BACKEND_URLS = [
+  "https://prod.rulet.tv",
+  "https://stage.rulet.tv",
+  ...[...TEST_ENVIRONMENTS].map(nativeTestHost),
+];
+
+async function scanArtifactForAscii(file, values) {
+  const needles = values.map((value) => ({ value, bytes: Buffer.from(value, "ascii") }));
+  const found = new Set();
+  const overlap = Math.max(...needles.map((item) => item.bytes.length)) - 1;
+  let carry = Buffer.alloc(0);
+  for await (const chunk of createReadStream(file, { highWaterMark: 1024 * 1024 })) {
+    const data = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+    for (const item of needles) if (data.indexOf(item.bytes) >= 0) found.add(item.value);
+    carry = overlap > 0 && data.length > overlap ? data.subarray(data.length - overlap) : data;
+  }
+  return [...found];
+}
+
+async function proveAndroidTestHostArtifact(apk, environment) {
+  const selectedHost = nativeTestHost(environment);
+  const observedHosts = await scanArtifactForAscii(apk, ANDROID_BACKEND_URLS);
+  if (!observedHosts.includes(selectedHost)) fail(`Signed APK does not contain the selected ${environment} backend`);
+  const conflictingHosts = observedHosts.filter((host) => host !== selectedHost);
+  if (conflictingHosts.length) fail(`Signed APK contains a backend conflicting with ${environment}`);
+  return { selectedHost, observedHosts, conflictingHostsAbsent: true, method: "compiled-apk-content" };
+}
+
 async function applyAndroidTestHostOverlay(applicationRoot, environment) {
   const target = nativeTestHost(environment);
   const source = path.join(applicationRoot, "src", "state", "firebase.native.ts");
@@ -911,6 +942,27 @@ async function resolveAdb(request, deps) {
   candidates.push(deps.platform === "win32" ? "adb.exe" : "adb");
   return executableCandidate(deps.runner, candidates, ["version"], "Android adb");
 }
+
+async function proveInstalledAndroidArtifact(request, deps, adb, mobile, built) {
+  const located = await deps.runner(adb, ["-s", mobile.deviceId, "shell", "pm", "path", built.packageName], { allowFailure: true, timeoutMs: 30_000, maxOutput: 64 * 1024 });
+  const remoteApk = located.code === 0
+    ? located.stdout.split(/\r?\n/).map((line) => /^package:(\/.*\/base\.apk)$/.exec(line.trim())?.[1]).find(Boolean)
+    : null;
+  if (!remoteApk) fail("ADB could not resolve the installed base APK");
+  const pulledApk = path.join(workspace(request), `.installed-${built.apkSha256}.apk`);
+  try {
+    const pulled = await deps.runner(adb, ["-s", mobile.deviceId, "pull", remoteApk, pulledApk], { allowFailure: true, timeoutMs: 2 * 60_000, maxOutput: 128 * 1024 });
+    if (pulled.code !== 0) fail("ADB could not read back the installed base APK");
+    await assertFile(pulledApk);
+    const installedSha256 = await sha256File(pulledApk);
+    if (installedSha256 !== built.apkSha256) fail("Installed base APK does not match the exact signed Chat Test artifact");
+    const backend = await proveAndroidTestHostArtifact(pulledApk, built.testHostOverlay.environment);
+    return { installedSha256, matchesBuiltArtifact: true, backend };
+  } finally {
+    await unlink(pulledApk).catch(() => {});
+  }
+}
+
 async function mobilerunCommand(mobile, deps, args, label, timeoutMs = 30_000) {
   const result = await deps.runner(mobile.executable, args, { allowFailure: true, timeoutMs, maxOutput: 512 * 1024 });
   if (result.code !== 0) fail(`Mobilerun ${label} failed`);
@@ -1140,6 +1192,7 @@ async function cambleTest(request, deps) {
           applicationSha,
           backendSha,
           testHostOverlay: result.testHostOverlay,
+          testHostArtifact: result.testHostArtifact,
         };
         return lifecycle.provenance.androidArtifact;
       });
@@ -1161,7 +1214,8 @@ async function cambleTest(request, deps) {
           || !new RegExp(`versionCode=${built.buildNumber}(?:\\s|$)`).test(details.stdout)) {
           fail(`Installed APK package ${built.packageName} did not match the built version`);
         }
-        return { deviceId: mobile.deviceId, packageName: built.packageName, versionName: built.versionName, buildNumber: built.buildNumber, artifactSha256: built.apkSha256, installed: true, staleStateCleared: true, installer: path.basename(adb) };
+        const installedArtifact = await proveInstalledAndroidArtifact(request, deps, adb, mobile, built);
+        return { deviceId: mobile.deviceId, packageName: built.packageName, versionName: built.versionName, buildNumber: built.buildNumber, artifactSha256: built.apkSha256, installed: true, staleStateCleared: true, installer: path.basename(adb), installedArtifact };
       });
       await runTestStep(lifecycle, "mobilerun-thinking", deps, async () => {
         const secure = await secureMobilerunCaseConfig(deps);
@@ -1169,16 +1223,7 @@ async function cambleTest(request, deps) {
         await deps.runner(adb, ["-s", mobile.deviceId, "logcat", "-c"], { allowFailure: true, timeoutMs: 30_000, maxOutput: 64 * 1024 });
         await mobilerunCommand(mobile, deps, ["device", "start", "-d", mobile.deviceId, built.packageName], "APK launch");
         const expectedHost = nativeTestHost(input.environment);
-        let runtimeHostObserved = false;
-        for (let attempt = 0; attempt < 30; attempt += 1) {
-          const logs = await deps.runner(adb, ["-s", mobile.deviceId, "logcat", "-d", "ReactNativeJS:I", "*:S"], { allowFailure: true, timeoutMs: 30_000, maxOutput: 512 * 1024 });
-          if (logs.code === 0 && logs.stdout.includes(expectedHost)) {
-            runtimeHostObserved = true;
-            break;
-          }
-          await deps.sleep(500);
-        }
-        if (!runtimeHostObserved) fail(`Running APK did not prove the selected ${input.environment} backend`);
+        if (built.testHostArtifact?.selectedHost !== expectedHost) fail(`Running APK did not prove the selected ${input.environment} backend`);
         const initialScreenshot = await captureMobileScreenshot(request, deps, lifecycle, artifacts, mobile, "before-thinking");
         const prompt = authenticatedMobilerunPrompt(input, built.packageName);
         const result = await deps.runner(mobile.executable, [
@@ -1198,6 +1243,7 @@ async function cambleTest(request, deps) {
           authenticatedWithCredentialIds: CAMBLE_MOBILERUN_SECRET_IDS,
           selectedEnvironment: input.environment,
           runtimeHost: expectedHost,
+          runtimeHostProof: { method: "installed-apk-sha256-and-compiled-content", artifactSha256: built.apkSha256, backend: built.testHostArtifact },
           initialScreenshot,
           trajectory: trajectoryEvidence,
         };

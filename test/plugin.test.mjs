@@ -687,6 +687,9 @@ async function prepareMobilerunCaseHome(workspace) {
 function androidTestRunner(workspace, options = {}) {
   let mobileUI = "initial";
   let screenshotNumber = 0;
+  const signedApkContent = options.failure === "runtime-host"
+    ? "signed-apk-content https://stage.rulet.tv"
+    : "signed-apk-content https://test.rulet.tv";
   return refsRunner({
     heads: {
       "application3:refs/heads/feature/chat-test": C,
@@ -706,7 +709,7 @@ function androidTestRunner(workspace, options = {}) {
         const applicationRoot = path.dirname(commandOptions.cwd);
         const apkDir = path.join(applicationRoot, "android", "app", "build", "outputs", "apk", "release");
         await mkdir(apkDir, { recursive: true });
-        await writeFile(path.join(apkDir, "app-release.apk"), "signed-apk-content");
+        await writeFile(path.join(apkDir, "app-release.apk"), signedApkContent);
         return { code: 0, stdout: "", stderr: "" };
       }
       if (command === "apksigner") {
@@ -722,7 +725,11 @@ function androidTestRunner(workspace, options = {}) {
         if (args.includes("install")) return { code: options.failure === "install" ? 1 : 0, stdout: "Success\n", stderr: "" };
         if (args.includes("clear")) return { code: options.failure === "clear-state" ? 1 : 0, stdout: options.failure === "clear-state" ? "Failed\n" : "Success\n", stderr: "" };
         if (args.includes("dumpsys")) return { code: 0, stdout: options.failure === "version" ? "versionCode=72 versionName=5.1.0\n" : "versionCode=73 minSdk=26 targetSdk=36\nversionName=5.2.0-test.1\n", stderr: "" };
-        if (args.includes("logcat") && args.includes("-d")) return { code: 0, stdout: options.failure === "runtime-host" ? "Config: https://stage.rulet.tv\n" : "Config: https://test.rulet.tv\n", stderr: "" };
+        if (args.includes("pm") && args.includes("path")) return { code: 0, stdout: "package:/data/app/com.rulettv.app/base.apk\n", stderr: "" };
+        if (args.includes("pull")) {
+          await writeFile(args.at(-1), options.failure === "installed-artifact" ? "different installed apk" : signedApkContent);
+          return { code: 0, stdout: "1 file pulled\n", stderr: "" };
+        }
         if (args.includes("logcat")) return { code: 0, stdout: "", stderr: "" };
       }
       if (command === "mobilerun") {
@@ -863,14 +870,15 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   ]);
   const apk = result.output.provenance.androidArtifact;
   assert.equal(apk.path, `artifacts/camble-${C}-${D}.apk`);
-  assert.equal(apk.sha256, createHash("sha256").update("signed-apk-content").digest("hex"));
+  assert.equal(apk.sha256, createHash("sha256").update("signed-apk-content https://test.rulet.tv").digest("hex"));
   assert.deepEqual(apk.signed, { verified: true, certificateSha256: "3".repeat(64), verifier: "apksigner" });
   assert.equal(apk.applicationSha, C);
   assert.equal(apk.backendSha, D);
   assert.equal(apk.testHostOverlay.target, "https://test.rulet.tv");
   assert.notEqual(apk.testHostOverlay.beforeSha256, apk.testHostOverlay.afterSha256);
+  assert.deepEqual(apk.testHostArtifact, { selectedHost: "https://test.rulet.tv", observedHosts: ["https://test.rulet.tv"], conflictingHostsAbsent: true, method: "compiled-apk-content" });
   assert.equal((await stat(path.join(workspace, apk.path))).mode & 0o777, 0o400);
-  assert.equal((await readFile(path.join(workspace, apk.path), "utf8")), "signed-apk-content");
+  assert.equal((await readFile(path.join(workspace, apk.path), "utf8")), "signed-apk-content https://test.rulet.tv");
   assert.equal(result.artifacts.some((item) => item.type === "apk"), false, "Chat Test must not upload its large transient APK");
   assert.equal(result.artifacts.filter((item) => item.type === "test-evidence").length, 0);
   assert.equal(result.artifacts.filter((item) => item.type === "screenshot").length, 5);
@@ -879,7 +887,11 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   const mobileCalls = runner.calls.filter((call) => call.command === "mobilerun");
   assert.deepEqual(mobileCalls.slice(0, 6).map((call) => call.args.slice(0, 2).join(" ")), ["--version", "devices", "ping -d", "device start", "device screenshot", "run -c"]);
   const adbCalls = runner.calls.filter((call) => call.command === "adb");
-  assert.deepEqual(adbCalls.map((call) => call.args.includes("install") ? "install" : call.args.includes("clear") ? "clear-state" : call.args.includes("dumpsys") ? "verify-package" : call.args.includes("-c") ? "clear-log" : call.args.includes("-d") ? "read-log" : "version"), ["version", "install", "clear-state", "verify-package", "clear-log", "read-log"]);
+  assert.deepEqual(adbCalls.map((call) => call.args.includes("install") ? "install" : call.args.includes("clear") ? "clear-state" : call.args.includes("dumpsys") ? "verify-package" : call.args.includes("pm") && call.args.includes("path") ? "resolve-installed-apk" : call.args.includes("pull") ? "read-installed-apk" : call.args.includes("-c") ? "clear-log" : "version"), ["version", "install", "clear-state", "verify-package", "resolve-installed-apk", "read-installed-apk", "clear-log"]);
+  const installedArtifact = result.output.steps.find((item) => item.id === "install-android").evidence.installedArtifact;
+  assert.equal(installedArtifact.installedSha256, apk.sha256);
+  assert.equal(installedArtifact.matchesBuiltArtifact, true);
+  assert.equal(installedArtifact.backend.selectedHost, "https://test.rulet.tv");
   assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "tap").length, 3);
   assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "press").length, 2);
   assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "ui").length, 6);
@@ -913,7 +925,8 @@ test("Android fails terminally when credentials, signing, device, Mobilerun or t
     { failure: "install", step: "install-android", message: /ADB failed to install/ },
     { failure: "clear-state", step: "install-android", message: /clear stale app state/ },
     { failure: "version", step: "install-android", message: /did not match the built version/ },
-    { failure: "runtime-host", step: "mobilerun-thinking", message: /did not prove the selected test.rulet.tv backend/ },
+    { failure: "runtime-host", step: "build-android", message: /does not contain the selected test.rulet.tv backend/ },
+    { failure: "installed-artifact", step: "install-android", message: /does not match the exact signed Chat Test artifact/ },
     { failure: "credential-evidence", step: "mobilerun-thinking", message: /does not prove use of the configured test account/ },
     { failure: "thinking", step: "mobilerun-thinking", message: /did not complete successfully/ },
     { failure: "apk-ui", step: "verify-mobile-case", message: /empty UI tree/ },
