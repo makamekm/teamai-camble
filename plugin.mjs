@@ -1295,20 +1295,32 @@ function assertFinalMobileCaseUi(ui) {
 
 async function ensureTargetMobileUi(mobile, deps, ui) {
   try {
-    return { ui, target: assertFinalMobileCaseUi(ui), reopenedFromFeed: false };
-  } catch (error) {
-    if (!/["']page_feed["']/i.test(String(ui ?? ""))) throw error;
-    const eva = mobileControl(ui, "eva", /["']eva["']/i);
-    await mobilerunCommand(mobile, deps, ["device", "tap", "-d", mobile.deviceId, String(eva.x), String(eva.y)], "reopen Eva from Feed");
-    let lastError = error;
-    for (let attempt = 1; attempt <= 10; attempt += 1) {
-      await deps.sleep(1_000);
-      const reopened = await mobilerunCommand(mobile, deps, ["device", "ui", "-d", mobile.deviceId], `reopened Eva UI attempt ${attempt}`);
-      if (!reopened.stdout.trim()) continue;
+    return { ui, target: assertFinalMobileCaseUi(ui), reopenedFromFeed: false, reopenAttempts: 0 };
+  } catch (initialError) {
+    let currentUi = ui;
+    let lastError = initialError;
+    for (let reopenAttempt = 1; reopenAttempt <= 3; reopenAttempt += 1) {
+      await deps.sleep(reopenAttempt === 1 ? 2_000 : 1_000);
+      const settled = await mobilerunCommand(mobile, deps, ["device", "ui", "-d", mobile.deviceId], `settled final UI attempt ${reopenAttempt}`);
+      if (settled.stdout.trim()) currentUi = settled.stdout;
       try {
-        return { ui: reopened.stdout, target: assertFinalMobileCaseUi(reopened.stdout), reopenedFromFeed: true };
-      } catch (captureError) {
-        lastError = captureError;
+        return { ui: currentUi, target: assertFinalMobileCaseUi(currentUi), reopenedFromFeed: true, reopenAttempts: reopenAttempt - 1 };
+      } catch (settledError) {
+        lastError = settledError;
+      }
+      if (!/["']page_feed["']/i.test(String(currentUi ?? ""))) throw lastError;
+      const eva = mobileControl(currentUi, "eva", /["']eva["']/i);
+      await mobilerunCommand(mobile, deps, ["device", "tap", "-d", mobile.deviceId, String(eva.x), String(eva.y)], `reopen Eva from Feed attempt ${reopenAttempt}`);
+      for (let captureAttempt = 1; captureAttempt <= 4; captureAttempt += 1) {
+        await deps.sleep(1_000);
+        const reopened = await mobilerunCommand(mobile, deps, ["device", "ui", "-d", mobile.deviceId], `reopened Eva UI ${reopenAttempt}.${captureAttempt}`);
+        if (!reopened.stdout.trim()) continue;
+        currentUi = reopened.stdout;
+        try {
+          return { ui: currentUi, target: assertFinalMobileCaseUi(currentUi), reopenedFromFeed: true, reopenAttempts: reopenAttempt };
+        } catch (captureError) {
+          lastError = captureError;
+        }
       }
     }
     throw lastError;
@@ -1512,6 +1524,7 @@ async function cambleTest(request, deps) {
           trajectoryActionCount: trajectoryEvidence.actionCount,
           targetScreenshot,
           reopenedFromFeed: stabilized.reopenedFromFeed,
+          reopenAttempts: stabilized.reopenAttempts,
           interactionAssertions: [chatReaction, giftReaction, closeReaction],
         };
       });

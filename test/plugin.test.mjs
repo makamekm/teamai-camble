@@ -737,6 +737,7 @@ function androidTestRunner(workspace, options = {}) {
   let mobileUI = "initial";
   let screenshotNumber = 0;
   let mobilerunRuns = 0;
+  let feedTapAttempts = 0;
   const signedApkContent = options.failure === "runtime-host"
     ? "signed-apk-content https://stage.rulet.tv"
     : "signed-apk-content https://test.rulet.tv";
@@ -835,14 +836,16 @@ function androidTestRunner(workspace, options = {}) {
             await writeFile(path.join(directory, "trajectory.json"), JSON.stringify(trajectory));
             for (let index = 0; index < 4; index += 1) await writeFile(path.join(screenshots, `${String(index).padStart(4, "0")}.png`), `trajectory-screenshot-${index}`);
           }
-          mobileUI = options.failure === "final-feed" ? "feed" : "final";
+          mobileUI = new Set(["final-feed", "final-feed-stubborn"]).has(options.failure) ? "feed" : "final";
           return { code: omitTrajectory || emptyTrajectory || new Set(["thinking", "existing-account-mismatch", "terminal-reason", "terminal-boundary"]).has(options.failure) ? 3 : 0, stdout: "Mobilerun reasoning complete\n", stderr: "" };
         }
         if (args[0] === "device" && args[1] === "tap") {
           const x = Number(args[4]);
           if (mobileUI === "feed") {
+            feedTapAttempts += 1;
+            if (options.failure === "final-feed-stubborn" && feedTapAttempts === 1) return { code: 0, stdout: "Tapped\n", stderr: "" };
             mobileUI = "opening";
-            return { code: 0, stdout: "tapped\n", stderr: "" };
+            return { code: 0, stdout: "Tapped\n", stderr: "" };
           }
           mobileUI = options.failure === "button-noop" ? "target" : x < 250 ? "chat-result" : x < 450 ? "gift-result" : "closed";
           return { code: 0, stdout: "tapped\n", stderr: "" };
@@ -1026,17 +1029,18 @@ test("Android retries Mobilerun once only when the first attempt produces no dur
   assert.equal(result.output.steps.find((item) => item.id === "mobilerun-thinking").evidence.mobilerunAttempts, 2);
 });
 
-test("Android reopens Eva from a stable Feed before independent button verification", async () => {
+test("Android retries reopening Eva when the first stable Feed tap is a no-op", async () => {
   const workspace = await root();
   const environment = await prepareMobilerunCaseHome(workspace);
-  const runner = androidTestRunner(workspace, { failure: "final-feed" });
+  const runner = androidTestRunner(workspace, { failure: "final-feed-stubborn" });
   const result = await execute(androidTestRequest(workspace), { runner, apksignerPath: "apksigner", mobilerunPath: "mobilerun", environment, sleep: async () => {} });
   assert.equal(result.status, "ok");
   const verification = result.output.steps.find((item) => item.id === "verify-mobile-case").evidence;
   assert.equal(verification.reopenedFromFeed, true);
+  assert.equal(verification.reopenAttempts, 2);
   assert.deepEqual(verification.finalUiAssertions, ["eva", "chat", "gift", "close"]);
   const taps = runner.calls.filter((call) => call.command === "mobilerun" && call.args[0] === "device" && call.args[1] === "tap");
-  assert.equal(taps.length, 4);
+  assert.equal(taps.length, 5);
 });
 
 test("Android fails terminally when credentials, signing, device, Mobilerun or target-screen evidence is missing", async () => {
