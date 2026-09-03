@@ -304,8 +304,47 @@ test("Windows Android build uses the batch Gradle shim and preserves build-numbe
   const result = await execute(value, { runner, platform: "win32", environment: {} });
   assert.equal(result.output.versionName, "4.4.0+windows.1");
   assert.equal(result.output.buildNumber, "42");
+  assert.equal(result.output.gradleAttempts, 1);
   assert.equal(result.output.storeTrack, "internal");
   assert.ok(runner.calls.some((call) => call.command === "gradlew.bat"));
+});
+
+test("Android build retries one transient Gradle failure in the same workspace", async () => {
+  const workspace = await root();
+  let gradleCalls = 0;
+  const runner = refsRunner({
+    clone: async (target, url) => {
+      if (!url.includes("application3")) return;
+      await mkdir(path.join(target, "builder"), { recursive: true });
+      await mkdir(path.join(target, "android", "app"), { recursive: true });
+      await writeFile(path.join(target, "app.json"), JSON.stringify({ expo: { version: "4.4.0+retry.1", android: { versionCode: 42 }, ios: { buildNumber: "42" } } }));
+      await writeFile(path.join(target, "android", "gradle.properties"), "org.gradle.daemon=false\n");
+    },
+    handler: async (command, args, options) => {
+      if (command === "gradlew.bat") {
+        gradleCalls += 1;
+        if (gradleCalls === 1) throw new Error("gradlew transient native build failure");
+        const applicationRoot = path.dirname(options.cwd);
+        const apk = path.join(applicationRoot, "android", "app", "build", "outputs", "apk", "release");
+        const aab = path.join(applicationRoot, "android", "app", "build", "outputs", "bundle", "release");
+        await mkdir(apk, { recursive: true });
+        await mkdir(aab, { recursive: true });
+        await writeFile(path.join(apk, "app-release.apk"), "apk");
+        await writeFile(path.join(aab, "app-release.aab"), "aab");
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  const value = request("android-build", { applicationSha: A, backendSha: B, dryRun: false }, workspace);
+  value.secrets = {
+    ANDROID_UPLOAD_KEYSTORE_BASE64: Buffer.alloc(32, 1).toString("base64"),
+    ANDROID_UPLOAD_STORE_PASSWORD: "store-secret",
+    ANDROID_UPLOAD_KEY_ALIAS: "upload",
+    ANDROID_UPLOAD_KEY_PASSWORD: "key-secret",
+  };
+  const result = await execute(value, { runner, platform: "win32", environment: {}, sleep: async () => {} });
+  assert.equal(result.output.gradleAttempts, 2);
+  assert.equal(gradleCalls, 2);
 });
 
 function kubernetesResources(options = {}) {

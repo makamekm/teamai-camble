@@ -512,7 +512,18 @@ async function buildSignedAndroid(request, deps, options) {
   await writeFile(propertiesPath, `${properties}\nAPP_UPLOAD_STORE_PASSWORD=${gradleProperty(storePassword)}\nAPP_UPLOAD_KEY_ALIAS=${gradleProperty(keyAlias)}\nAPP_UPLOAD_KEY_PASSWORD=${gradleProperty(keyPassword)}\n`, { mode: 0o600 });
   const gradle = deps.platform === "win32" ? "gradlew.bat" : "./gradlew";
   const tasks = options.includeBundle ? ["app:bundleRelease", "app:assembleRelease"] : ["app:assembleRelease"];
-  await deps.runner(gradle, [...tasks, "--no-daemon", "--max-workers=2", "-Dorg.gradle.parallel=false", "-Dorg.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8", "-Pkotlin.compiler.execution.strategy=in-process", `-PAPP_VERSION_CODE=${buildNumber}`, "-PreactNativeArchitectures=arm64-v8a", "-PAPP_UPLOAD_STORE_FILE=upload.jks"], { cwd: path.join(applicationRoot, "android"), timeoutMs: 30 * 60 * 1000 });
+  const gradleArgs = [...tasks, "--no-daemon", "--max-workers=2", "-Dorg.gradle.parallel=false", "-Dorg.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8", "-Pkotlin.compiler.execution.strategy=in-process", `-PAPP_VERSION_CODE=${buildNumber}`, "-PreactNativeArchitectures=arm64-v8a", "-PAPP_UPLOAD_STORE_FILE=upload.jks"];
+  let gradleAttempts = 0;
+  while (gradleAttempts < 2) {
+    gradleAttempts += 1;
+    try {
+      await deps.runner(gradle, gradleArgs, { cwd: path.join(applicationRoot, "android"), timeoutMs: 30 * 60 * 1000 });
+      break;
+    } catch (error) {
+      if (gradleAttempts >= 2) throw error;
+      await deps.sleep(1_000);
+    }
+  }
   const apkSource = path.join(applicationRoot, "android/app/build/outputs/apk/release/app-release.apk");
   await assertFile(apkSource);
   const artifactRoot = path.join(root, "artifacts");
@@ -540,7 +551,7 @@ async function buildSignedAndroid(request, deps, options) {
     ? await proveAndroidTestHostArtifact(apk, options.testEnvironment)
     : null;
   if (options.immutable) await chmod(apk, 0o400);
-  return { root, applicationRoot, artifactRoot, apk, aab, apkSha256, signing, versionName, buildNumber: String(buildNumber), packageName, testHostOverlay, testHostArtifact };
+  return { root, applicationRoot, artifactRoot, apk, aab, apkSha256, signing, versionName, buildNumber: String(buildNumber), packageName, testHostOverlay, testHostArtifact, gradleAttempts };
 }
 async function androidBuild(request, deps) {
   const input = inputs(request);
@@ -553,7 +564,7 @@ async function androidBuild(request, deps) {
   if (input.backendSha !== undefined && input.backendSha !== backendSha) fail("backend:dev moved; refresh build data");
   if (dryRun) return ok("Planned application3 dev build", { dryRun, applicationSha, backendSha, verifiedBranch: "dev", storeTrack: PLAY_TRACK, steps: ["resolve current dev SHAs", "clone exact SHAs", "npm ci/preinit", "signed APK+AAB", "optional Google Play Internal upload"] });
   const built = await buildSignedAndroid(request, deps, { directory: "android-build", applicationSha, backendSha, includeBundle: true, apkFileName: "camble.apk", aabFileName: "camble.aab", requirePackage: false, verifySignature: false, immutable: false });
-  const { root, applicationRoot, apk, aab, versionName, buildNumber } = built;
+  const { root, applicationRoot, apk, aab, versionName, buildNumber, gradleAttempts } = built;
   let storeStatus = "skipped";
   const serviceAccount = secret(request, deps, "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON", false);
   if (serviceAccount) {
@@ -567,7 +578,7 @@ async function androidBuild(request, deps) {
     { path: path.relative(root, apk), type: "apk", versionName, buildNumber },
     { path: path.relative(root, aab), type: "aab", versionName, buildNumber },
   ];
-  return ok(`Built signed Camble Android ${versionName} (${buildNumber})`, { dryRun, applicationSha, backendSha, verifiedBranch: "dev", versionName, buildNumber, storeTrack: PLAY_TRACK, storeStatus }, artifacts);
+  return ok(`Built signed Camble Android ${versionName} (${buildNumber})`, { dryRun, applicationSha, backendSha, verifiedBranch: "dev", versionName, buildNumber, gradleAttempts, storeTrack: PLAY_TRACK, storeStatus }, artifacts);
 }
 
 function optionalText(value, label, maxLength) {
@@ -1303,6 +1314,7 @@ async function cambleTest(request, deps) {
           signed: result.signing,
           versionName: result.versionName,
           buildNumber: result.buildNumber,
+          gradleAttempts: result.gradleAttempts,
           packageName: result.packageName,
           applicationSha,
           backendSha,
