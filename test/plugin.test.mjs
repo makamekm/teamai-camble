@@ -991,7 +991,7 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   assert.equal((await readFile(path.join(workspace, apk.path), "utf8")), "signed-apk-content https://test.rulet.tv");
   assert.equal(result.artifacts.some((item) => item.type === "apk"), false, "Chat Test must not upload its large transient APK");
   assert.equal(result.artifacts.filter((item) => item.type === "test-evidence").length, 0);
-  assert.equal(result.artifacts.filter((item) => item.type === "screenshot").length, 1);
+  assert.equal(result.artifacts.filter((item) => item.type === "screenshot").length, 0);
   assert.equal(result.output.screenshots.length, 1);
   assert.ok(result.output.screenshots.every((item) => /^[0-9a-f]{64}$/.test(item.sha256)));
   const durableVerification = result.output.steps.find((item) => item.id === "verify-mobile-case").evidence;

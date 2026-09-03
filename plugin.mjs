@@ -1074,14 +1074,10 @@ async function captureMobileScreenshot(request, deps, lifecycle, artifacts, mobi
   const source = path.isAbsolute(returned) ? returned : path.resolve(workspace(request), returned);
   const sourceStat = await stat(source).catch(() => null);
   if (!sourceStat?.isFile() || sourceStat.size < 1 || sourceStat.size > 20 * 1024 * 1024 || path.extname(source).toLowerCase() !== ".png") fail("Mobilerun returned an invalid screenshot");
-  const destination = path.join(workspace(request), "artifacts", `android-${kind}-${lifecycle.environment}.png`);
-  await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
-  await copyFile(source, destination);
-  const sha256 = await sha256File(destination);
-  const relative = relativeArtifactPath(workspace(request), destination);
-  artifacts.push({ path: relative, type: "screenshot" });
-  lifecycle.screenshots.push({ target: "Android", kind, path: relative, sha256 });
-  return { path: relative, sha256 };
+  const sha256 = await sha256File(source);
+  const evidence = { target: "Android", kind, bytes: sourceStat.size, sha256 };
+  lifecycle.screenshots.push(evidence);
+  return evidence;
 }
 
 const CAMBLE_MOBILERUN_SECRET_IDS = ["CAMBLE_TEST_EMAIL", "CAMBLE_TEST_PASSWORD"];
