@@ -811,12 +811,27 @@ function androidTestRunner(workspace, options = {}) {
             const directory = path.join(home, ".teamai", "camble-mobilerun-trajectories", `trajectory_20260903_120000_${mobilerunRuns}`);
             const screenshots = path.join(directory, "screenshots");
             await mkdir(screenshots, { recursive: true });
-            const actions = [
+            const secretActions = [
               { action: "type_secret", secret_id: "CAMBLE_TEST_EMAIL" },
               ...(new Set(["credential-evidence", "existing-account-mismatch"]).has(options.failure) ? [] : [{ action: "type_secret", secret_id: "CAMBLE_TEST_PASSWORD" }]),
-              { action: "click_at", x: 1, y: 1 }, { action: "click_at", x: 2, y: 2 },
-              { action: "swipe", x1: 1, y1: 2, x2: 1, y2: 1 }, { action: "click_at", x: 3, y: 3 },
-              { action: "press_back" }, { action: "click_at", x: 4, y: 4 }, { action: "click_at", x: 5, y: 5 },
+            ];
+            const profileNodes = [
+              { class: "TextView", text: "Eva", bounds: { left: 20, top: 20, right: 120, bottom: 80 } },
+              { class: "ViewGroup", text: "Chat", bounds: { left: 100, top: 700, right: 250, bottom: 800 } },
+              ...(options.failure === "trajectory-controls" ? [] : [{ class: "ViewGroup", text: "Gift", bounds: { left: 300, top: 700, right: 450, bottom: 800 } }]),
+              { class: "Button", text: "Close", bounds: { left: 500, top: 700, right: 600, bottom: 800 } },
+            ];
+            const actions = [
+              ...secretActions,
+              { action: "tap", x: 150, y: 750, pre_state: { screen: "profile", nodes: profileNodes } },
+              options.failure === "trajectory-noop"
+                ? { action: "wait", duration: 0.5, pre_state: { screen: "profile", nodes: profileNodes } }
+                : { action: "wait", duration: 0.5, pre_state: { screen: "chat", nodes: [{ text: "Conversation with Eva", bounds: { left: 0, top: 0, right: 600, bottom: 900 } }] } },
+              { action: "tap", x: 350, y: 750, pre_state: { screen: "profile", nodes: profileNodes } },
+              { action: "wait", duration: 0.5, pre_state: { screen: "gifts", nodes: [{ text: "Gifts", bounds: { left: 0, top: 0, right: 600, bottom: 900 } }] } },
+              { action: "tap", x: 550, y: 750, pre_state: { screen: "profile", nodes: profileNodes } },
+              { action: "wait", duration: 0.5, pre_state: { screen: "feed", nodes: [{ text: "page_feed", bounds: { left: 0, top: 0, right: 600, bottom: 900 } }] } },
+              { action: "tap", x: 4, y: 4 }, { action: "tap", x: 5, y: 5 },
             ];
             await writeFile(path.join(directory, "macro.json"), JSON.stringify({ macro_schema_version: "1", version: "1", total_actions: actions.length, actions }));
             const terminal = options.failure === "terminal-boundary"
@@ -976,9 +991,11 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   assert.equal((await readFile(path.join(workspace, apk.path), "utf8")), "signed-apk-content https://test.rulet.tv");
   assert.equal(result.artifacts.some((item) => item.type === "apk"), false, "Chat Test must not upload its large transient APK");
   assert.equal(result.artifacts.filter((item) => item.type === "test-evidence").length, 0);
-  assert.equal(result.artifacts.filter((item) => item.type === "screenshot").length, 5);
-  assert.equal(result.output.screenshots.length, 5);
+  assert.equal(result.artifacts.filter((item) => item.type === "screenshot").length, 1);
+  assert.equal(result.output.screenshots.length, 1);
   assert.ok(result.output.screenshots.every((item) => /^[0-9a-f]{64}$/.test(item.sha256)));
+  const durableVerification = result.output.steps.find((item) => item.id === "verify-mobile-case").evidence;
+  assert.match(durableVerification.targetScreenshot.sha256, /^[0-9a-f]{64}$/);
   const mobileCalls = runner.calls.filter((call) => call.command === "mobilerun");
   assert.deepEqual(mobileCalls.slice(0, 6).map((call) => call.args.slice(0, 2).join(" ")), ["--version", "devices", "ping -d", "device start", "device screenshot", "run -c"]);
   const adbCalls = runner.calls.filter((call) => call.command === "adb");
@@ -987,10 +1004,10 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   assert.equal(installedArtifact.installedSha256, apk.sha256);
   assert.equal(installedArtifact.matchesBuiltArtifact, true);
   assert.equal(installedArtifact.backend.selectedHost, "https://test.rulet.tv");
-  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "tap").length, 3);
-  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "press").length, 2);
-  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "ui").length, 6);
-  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "screenshot").length, 5);
+  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "tap").length, 0);
+  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "press").length, 0);
+  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "ui").length, 0);
+  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "screenshot").length, 1);
   const thinking = mobileCalls.find((call) => call.args[0] === "run");
   assert.ok(thinking.args.includes("--reasoning"));
   assert.ok(thinking.args.includes("--vision"));
@@ -1014,7 +1031,7 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   const verification = result.output.steps.find((item) => item.id === "verify-mobile-case").evidence;
   assert.deepEqual(verification.finalUiAssertions, ["eva", "chat", "gift", "close"]);
   assert.deepEqual(verification.interactionAssertions.map((item) => item.control), ["chat", "gift", "close"]);
-  assert.ok(verification.interactionAssertions.every((item) => item.beforeUiSha256 !== item.afterUiSha256));
+  assert.ok(verification.interactionAssertions.every((item) => item.preStateSha256 !== item.nextStateSha256));
   assert.equal(runner.calls.some((call) => call.command === "git" && call.args[0] === "push"), false);
 });
 
@@ -1029,18 +1046,20 @@ test("Android retries Mobilerun once only when the first attempt produces no dur
   assert.equal(result.output.steps.find((item) => item.id === "mobilerun-thinking").evidence.mobilerunAttempts, 2);
 });
 
-test("Android retries reopening Eva when the first stable Feed tap is a no-op", async () => {
+test("Android proves Chat, Gift and Close taps from durable trajectory bounds", async () => {
   const workspace = await root();
   const environment = await prepareMobilerunCaseHome(workspace);
-  const runner = androidTestRunner(workspace, { failure: "final-feed-stubborn" });
+  const runner = androidTestRunner(workspace);
   const result = await execute(androidTestRequest(workspace), { runner, apksignerPath: "apksigner", mobilerunPath: "mobilerun", environment, sleep: async () => {} });
   assert.equal(result.status, "ok");
   const verification = result.output.steps.find((item) => item.id === "verify-mobile-case").evidence;
-  assert.equal(verification.reopenedFromFeed, true);
-  assert.equal(verification.reopenAttempts, 2);
   assert.deepEqual(verification.finalUiAssertions, ["eva", "chat", "gift", "close"]);
-  const taps = runner.calls.filter((call) => call.command === "mobilerun" && call.args[0] === "device" && call.args[1] === "tap");
-  assert.equal(taps.length, 5);
+  assert.deepEqual(verification.interactionAssertions.map((item) => item.control), ["chat", "gift", "close"]);
+  for (const item of verification.interactionAssertions) {
+    assert.equal(item.tap.x >= item.bounds.left && item.tap.x <= item.bounds.right, true);
+    assert.equal(item.tap.y >= item.bounds.top && item.tap.y <= item.bounds.bottom, true);
+    assert.notEqual(item.preStateSha256, item.nextStateSha256);
+  }
 });
 
 test("Android fails terminally when credentials, signing, device, Mobilerun or target-screen evidence is missing", async () => {
@@ -1065,9 +1084,8 @@ test("Android fails terminally when credentials, signing, device, Mobilerun or t
     { failure: "terminal-reason", step: "mobilerun-thinking", message: /Mobilerun terminal failure: The target profile could not be reached/ },
     { failure: "terminal-boundary", step: "mobilerun-thinking", message: /Mobilerun terminal failure:/ },
     { failure: "terminal-missing", step: "mobilerun-thinking", message: /did not produce a terminal verdict/ },
-    { failure: "apk-ui", step: "verify-mobile-case", message: /empty UI tree/ },
-    { failure: "final-ui", step: "verify-mobile-case", message: /does not expose gift with tappable bounds/ },
-    { failure: "button-noop", step: "verify-mobile-case", message: /chat tap did not change the UI/ },
+    { failure: "trajectory-controls", step: "verify-mobile-case", message: /does not prove tappable interactions for: gift/ },
+    { failure: "trajectory-noop", step: "verify-mobile-case", message: /chat tap did not change the UI state/ },
   ];
   for (const fixture of cases) {
     const workspace = await root();

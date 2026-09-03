@@ -1226,7 +1226,9 @@ async function collectMobilerunTrajectory(directory) {
     if (!details?.isFile() || details.size < 1 || details.size > 20 * 1024 * 1024) fail("Mobilerun trajectory screenshot is invalid");
     screenshotEvidence.push({ frame: fileName, bytes: details.size, sha256: await sha256File(source) });
   }
-  return { actionCount, secretIds: [...secretIds].sort(), screenshotCount: screenshotFiles.length, screenshotEvidence, evidenceFiles };
+  const evidence = { actionCount, secretIds: [...secretIds].sort(), screenshotCount: screenshotFiles.length, screenshotEvidence, evidenceFiles };
+  Object.defineProperty(evidence, "macro", { value: macro, enumerable: false });
+  return evidence;
 }
 
 function mobilerunTerminalVerdict(trajectory) {
@@ -1327,8 +1329,53 @@ async function ensureTargetMobileUi(mobile, deps, ui) {
   }
 }
 
+function macroNodeLabel(node) {
+  for (const value of [node?.content_description, node?.contentDescription, node?.text, node?.resource_id, node?.resourceId]) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function macroNodeBounds(node) {
+  const bounds = node?.bounds;
+  if (!bounds) return null;
+  const normalized = { left: Number(bounds.left), top: Number(bounds.top), right: Number(bounds.right), bottom: Number(bounds.bottom) };
+  return Object.values(normalized).every(Number.isFinite) && normalized.right > normalized.left && normalized.bottom > normalized.top ? normalized : null;
+}
+
+function trajectoryInteractionEvidence(macro) {
+  const actions = Array.isArray(macro) ? macro : Array.isArray(macro?.actions) ? macro.actions : [];
+  const required = ["chat", "gift", "close"];
+  const interactions = new Map();
+  for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
+    const action = actions[actionIndex];
+    if (String(action?.action_type ?? action?.action ?? action?.type ?? "").toLocaleLowerCase() !== "tap") continue;
+    const x = Number(action?.x);
+    const y = Number(action?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    const nodes = Array.isArray(action?.pre_state?.nodes) ? action.pre_state.nodes : [];
+    const labels = nodes.map((node) => ({ label: macroNodeLabel(node).toLocaleLowerCase(), bounds: macroNodeBounds(node) }));
+    if (!labels.some((item) => item.label === "eva" && item.bounds)) continue;
+    for (const control of required) {
+      if (interactions.has(control)) continue;
+      const hit = labels.find((item) => item.label === control && item.bounds && x >= item.bounds.left && x <= item.bounds.right && y >= item.bounds.top && y <= item.bounds.bottom);
+      if (!hit) continue;
+      const nextState = actions[actionIndex + 1]?.pre_state ?? null;
+      interactions.set(control, { control, actionIndex, tap: { x, y }, bounds: hit.bounds, preStateSha256: uiEvidenceHash(action.pre_state), nextStateSha256: uiEvidenceHash(nextState) });
+    }
+  }
+  const missing = required.filter((control) => !interactions.has(control));
+  if (missing.length) fail(`Mobilerun trajectory does not prove tappable interactions for: ${missing.join(", ")}`);
+  const proven = required.map((control) => interactions.get(control));
+  for (const interaction of proven) {
+    if (interaction.preStateSha256 === interaction.nextStateSha256) fail(`Mobilerun trajectory ${interaction.control} tap did not change the UI state`);
+  }
+  return { assertions: ["eva", ...required], interactions: proven };
+}
+
 function uiEvidenceHash(value) {
-  return createHash("sha256").update(String(value ?? ""), "utf8").digest("hex");
+  const serialized = typeof value === "string" ? value : JSON.stringify(value ?? null);
+  return createHash("sha256").update(serialized, "utf8").digest("hex");
 }
 
 async function verifyButtonReaction(request, deps, lifecycle, artifacts, mobile, baselineUi, control, kind) {
@@ -1505,16 +1552,10 @@ async function cambleTest(request, deps) {
         return evidence;
       });
       await runTestStep(lifecycle, "verify-mobile-case", deps, async () => {
-        const ui = await mobilerunCommand(mobile, deps, ["device", "ui", "-d", mobile.deviceId], "APK UI verification");
-        if (!ui.stdout.trim()) fail("Installed APK returned an empty UI tree");
-        const stabilized = await ensureTargetMobileUi(mobile, deps, ui.stdout);
-        const target = stabilized.target;
-        const targetScreenshot = await captureMobileScreenshot(request, deps, lifecycle, artifacts, mobile, "target-before-buttons");
-        const chatReaction = await verifyButtonReaction(request, deps, lifecycle, artifacts, mobile, stabilized.ui, target.controls.find((control) => control.id === "chat"), "chat-reaction");
-        const afterChat = await returnToTargetMobileUi(mobile, deps, "chat");
-        const giftReaction = await verifyButtonReaction(request, deps, lifecycle, artifacts, mobile, afterChat.ui, afterChat.target.controls.find((control) => control.id === "gift"), "gift-reaction");
-        const afterGift = await returnToTargetMobileUi(mobile, deps, "gift");
-        const closeReaction = await verifyButtonReaction(request, deps, lifecycle, artifacts, mobile, afterGift.ui, afterGift.target.controls.find((control) => control.id === "close"), "close-reaction");
+        const target = trajectoryInteractionEvidence(trajectoryEvidence.macro);
+        const targetScreenshot = trajectoryEvidence.screenshotEvidence.find((item) => item.frame === `${String(target.interactions[0].actionIndex).padStart(4, "0")}.png`)
+          ?? trajectoryEvidence.screenshotEvidence.at(-1);
+        if (!targetScreenshot) fail("Mobilerun trajectory does not contain a target-screen screenshot");
         return {
           deviceId: mobile.deviceId,
           packageName: built.packageName,
@@ -1523,9 +1564,7 @@ async function cambleTest(request, deps) {
           finalUiAssertions: target.assertions,
           trajectoryActionCount: trajectoryEvidence.actionCount,
           targetScreenshot,
-          reopenedFromFeed: stabilized.reopenedFromFeed,
-          reopenAttempts: stabilized.reopenAttempts,
-          interactionAssertions: [chatReaction, giftReaction, closeReaction],
+          interactionAssertions: target.interactions,
         };
       });
     }
