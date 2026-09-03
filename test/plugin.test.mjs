@@ -723,7 +723,7 @@ async function prepareMobilerunCaseHome(workspace) {
   await writeFile(path.join(teamai, "camble-mobilerun-credentials.yaml"), [
     "secrets:",
     "  CAMBLE_TEST_EMAIL:",
-    '    value: "qa-existing@example.com"',
+    '    value: "qa-existing@example.com" # inline comment',
     "    enabled: true",
     "  CAMBLE_TEST_PASSWORD:",
     '    value: "test-password-value"',
@@ -803,11 +803,11 @@ function androidTestRunner(workspace, options = {}) {
         if (args[0] === "device" && args[1] === "start") { mobileUI = "initial"; return { code: 0, stdout: "started\n", stderr: "" }; }
         if (args[0] === "run") {
           mobilerunRuns += 1;
-          const omitTrajectory = options.failure === "trajectory"
-            || (options.failure === "trajectory-once" && mobilerunRuns === 1);
+          const omitTrajectory = options.failure === "trajectory";
+          const emptyTrajectory = options.failure === "trajectory-once" && mobilerunRuns === 1;
           if (!omitTrajectory) {
             const home = path.join(workspace, "home");
-            const directory = path.join(home, ".teamai", "camble-mobilerun-trajectories", "trajectory_20260903_120000");
+            const directory = path.join(home, ".teamai", "camble-mobilerun-trajectories", `trajectory_20260903_120000_${mobilerunRuns}`);
             const screenshots = path.join(directory, "screenshots");
             await mkdir(screenshots, { recursive: true });
             const actions = [
@@ -818,26 +818,30 @@ function androidTestRunner(workspace, options = {}) {
               { action: "press_back" }, { action: "click_at", x: 4, y: 4 }, { action: "click_at", x: 5, y: 5 },
             ];
             await writeFile(path.join(directory, "macro.json"), JSON.stringify({ macro_schema_version: "1", version: "1", total_actions: actions.length, actions }));
-            const terminal = options.failure === "existing-account-mismatch"
+            const terminal = options.failure === "terminal-boundary"
+              ? { type: "ResultEvent", success: false, reason: `${"x".repeat(1_998)}qa-existing@example.com` }
+              : options.failure === "existing-account-mismatch"
               ? { type: "ManagerPlanDetailsEvent", success: false, answer: "The provided email is not recognized as an existing account and the flow is attempting to create a new password." }
               : options.failure === "terminal-reason"
                 ? { type: "ManagerPlanDetailsEvent", success: false, answer: "The target profile could not be reached." }
                 : options.failure === "terminal-missing"
                   ? { type: "ManagerPlanDetailsEvent", success: null, answer: "" }
                   : { type: "ResultEvent", success: options.failure !== "thinking", reason: options.failure === "thinking" ? "The autonomous case failed for qa-existing@example.com with test-password-value." : "" };
-            const trajectory = options.failure === "terminal-missing"
+            const trajectory = emptyTrajectory
+              ? []
+              : options.failure === "terminal-missing"
               ? [{ type: "ResultEvent", success: true, answer: "Premature result" }, terminal]
               : [terminal];
             await writeFile(path.join(directory, "trajectory.json"), JSON.stringify(trajectory));
             for (let index = 0; index < 4; index += 1) await writeFile(path.join(screenshots, `${String(index).padStart(4, "0")}.png`), `trajectory-screenshot-${index}`);
           }
           mobileUI = options.failure === "final-feed" ? "feed" : "final";
-          return { code: omitTrajectory || new Set(["thinking", "existing-account-mismatch", "terminal-reason"]).has(options.failure) ? 3 : 0, stdout: "Mobilerun reasoning complete\n", stderr: "" };
+          return { code: omitTrajectory || emptyTrajectory || new Set(["thinking", "existing-account-mismatch", "terminal-reason", "terminal-boundary"]).has(options.failure) ? 3 : 0, stdout: "Mobilerun reasoning complete\n", stderr: "" };
         }
         if (args[0] === "device" && args[1] === "tap") {
           const x = Number(args[4]);
           if (mobileUI === "feed") {
-            mobileUI = "target";
+            mobileUI = "opening";
             return { code: 0, stdout: "tapped\n", stderr: "" };
           }
           mobileUI = options.failure === "button-noop" ? "target" : x < 250 ? "chat-result" : x < 450 ? "gift-result" : "closed";
@@ -851,6 +855,10 @@ function androidTestRunner(workspace, options = {}) {
           let stdout = "";
           if (options.failure !== "apk-ui") {
             if (mobileUI === "feed") stdout = '1. android.view.View: "page_feed" - (0,0,600,900)\n2. android.view.View: "Eva" - (20,100,580,700)\n';
+            else if (mobileUI === "opening") {
+              mobileUI = "target";
+              stdout = '1. android.view.View: "Eva" - (0,0,600,700)\n';
+            }
             else if (mobileUI === "chat-result") stdout = '1. android.view.View: "Conversation with Eva" - (0,0,600,900)\n';
             else if (mobileUI === "gift-result") stdout = '1. android.view.View: "Send a gift to Eva" - (0,0,600,900)\n';
             else if (mobileUI === "closed") stdout = '1. android.view.View: "Feed Eva" - (0,0,600,900)\n';
@@ -1051,6 +1059,7 @@ test("Android fails terminally when credentials, signing, device, Mobilerun or t
     { failure: "thinking", step: "mobilerun-thinking", message: /The autonomous case failed/ },
     { failure: "existing-account-mismatch", step: "mobilerun-thinking", message: /existing-account environment mismatch: The provided email is not recognized as an existing account and the flow is attempting to create a new password/ },
     { failure: "terminal-reason", step: "mobilerun-thinking", message: /Mobilerun terminal failure: The target profile could not be reached/ },
+    { failure: "terminal-boundary", step: "mobilerun-thinking", message: /Mobilerun terminal failure:/ },
     { failure: "terminal-missing", step: "mobilerun-thinking", message: /did not produce a terminal verdict/ },
     { failure: "apk-ui", step: "verify-mobile-case", message: /empty UI tree/ },
     { failure: "final-ui", step: "verify-mobile-case", message: /does not expose gift with tappable bounds/ },
@@ -1069,7 +1078,7 @@ test("Android fails terminally when credentials, signing, device, Mobilerun or t
     assert.equal(result.response.output.steps.find((item) => item.id === fixture.step).status, "failed", fixture.failure);
     assert.equal(result.response.output.verdict, "failed", fixture.failure);
     assert.equal(result.response.artifacts.length, 0, `${fixture.failure} failure must not be replaced by a secondary artifact transport error`);
-    if (new Set(["thinking", "existing-account-mismatch", "terminal-reason", "terminal-missing", "credential-evidence"]).has(fixture.failure)) {
+    if (new Set(["thinking", "existing-account-mismatch", "terminal-reason", "terminal-boundary", "terminal-missing", "credential-evidence"]).has(fixture.failure)) {
       const evidence = result.response.output.steps.find((item) => item.id === "mobilerun-thinking").evidence;
       assert.equal(evidence.trajectory.evidenceFiles.length, 2, `${fixture.failure} must retain trajectory hashes`);
       assert.equal(evidence.trajectory.screenshotEvidence.length, 4, `${fixture.failure} must retain screenshot hashes`);

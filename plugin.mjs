@@ -1090,15 +1090,21 @@ function yamlCredentialValue(value) {
   const trimmed = value.trim();
   if (!trimmed || new Set(["|", ">", "null", "~"]).has(trimmed)) return null;
   if (trimmed.startsWith('"')) {
+    const quoted = /^("(?:[^"\\]|\\.)*")(?:\s+#.*)?$/.exec(trimmed);
+    if (!quoted) return null;
     try {
-      const parsed = JSON.parse(trimmed);
+      const parsed = JSON.parse(quoted[1]);
       return typeof parsed === "string" && parsed ? parsed : null;
     } catch {
       return null;
     }
   }
-  if (trimmed.startsWith("'") && trimmed.endsWith("'")) return trimmed.slice(1, -1).replace(/''/g, "'") || null;
-  return trimmed;
+  const singleQuoted = /^'((?:[^']|'')*)'(?:\s+#.*)?$/.exec(trimmed);
+  if (singleQuoted) return singleQuoted[1].replace(/''/g, "'") || null;
+  if (trimmed.startsWith("'")) return null;
+  const comment = trimmed.search(/\s+#/);
+  const plain = (comment >= 0 ? trimmed.slice(0, comment) : trimmed).trimEnd();
+  return plain || null;
 }
 
 function mobilerunCredentialValues(contents) {
@@ -1120,11 +1126,11 @@ function mobilerunCredentialValues(contents) {
 }
 
 function redactMobilerunTerminalText(value, secretValues) {
-  let redacted = String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 2_000);
+  let redacted = String(value ?? "");
   for (const secret of [...secretValues].sort((left, right) => right.length - left.length)) {
     if (secret) redacted = redacted.split(secret).join("[REDACTED]");
   }
-  return redacted;
+  return redacted.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 2_000);
 }
 
 async function secureMobilerunCaseConfig(deps) {
@@ -1163,8 +1169,11 @@ async function newMobilerunTrajectory(root, before, deps) {
       if (!entry.isDirectory() || before.has(entry.name)) continue;
       const directory = path.join(root, entry.name);
       const macro = path.join(directory, "macro.json");
-      const details = await stat(macro).catch(() => null);
-      if (details?.isFile() && details.size > 0) candidates.push({ directory, modified: details.mtimeMs });
+      const trajectory = path.join(directory, "trajectory.json");
+      const [details, trajectoryDetails] = await Promise.all([stat(macro).catch(() => null), stat(trajectory).catch(() => null)]);
+      if (!details?.isFile() || details.size < 1 || !trajectoryDetails?.isFile() || trajectoryDetails.size <= 2) continue;
+      const events = await readFile(trajectory, "utf8").then((contents) => JSON.parse(contents)).catch(() => null);
+      if (Array.isArray(events) && events.length > 0) candidates.push({ directory, modified: Math.max(details.mtimeMs, trajectoryDetails.mtimeMs) });
     }
     if (candidates.length) return candidates.sort((left, right) => right.modified - left.modified)[0].directory;
     if (Date.now() >= deadline) break;
@@ -1226,9 +1235,7 @@ function mobilerunTerminalVerdict(trajectory) {
     && new Set(["ManagerPlanDetailsEvent", "ResultEvent"]).has(event.type));
   if (!terminal || typeof terminal.success !== "boolean") return null;
   const terminalText = typeof terminal.answer === "string" ? terminal.answer : terminal.reason;
-  const answer = typeof terminalText === "string"
-    ? terminalText.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 2_000)
-    : "";
+  const answer = typeof terminalText === "string" ? terminalText : "";
   return { type: terminal.type, success: terminal.success, answer };
 }
 
@@ -1293,10 +1300,18 @@ async function ensureTargetMobileUi(mobile, deps, ui) {
     if (!/["']page_feed["']/i.test(String(ui ?? ""))) throw error;
     const eva = mobileControl(ui, "eva", /["']eva["']/i);
     await mobilerunCommand(mobile, deps, ["device", "tap", "-d", mobile.deviceId, String(eva.x), String(eva.y)], "reopen Eva from Feed");
-    await deps.sleep(1_500);
-    const reopened = await mobilerunCommand(mobile, deps, ["device", "ui", "-d", mobile.deviceId], "reopened Eva UI");
-    if (!reopened.stdout.trim()) fail("Installed APK returned an empty UI tree after reopening Eva");
-    return { ui: reopened.stdout, target: assertFinalMobileCaseUi(reopened.stdout), reopenedFromFeed: true };
+    let lastError = error;
+    for (let attempt = 1; attempt <= 10; attempt += 1) {
+      await deps.sleep(1_000);
+      const reopened = await mobilerunCommand(mobile, deps, ["device", "ui", "-d", mobile.deviceId], `reopened Eva UI attempt ${attempt}`);
+      if (!reopened.stdout.trim()) continue;
+      try {
+        return { ui: reopened.stdout, target: assertFinalMobileCaseUi(reopened.stdout), reopenedFromFeed: true };
+      } catch (captureError) {
+        lastError = captureError;
+      }
+    }
+    throw lastError;
   }
 }
 
