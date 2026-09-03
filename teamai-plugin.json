@@ -70,15 +70,15 @@
     {
       "id": "test",
       "label": "Test",
-      "description": "Run fail-closed Camble browser and Android checks against an exact environment and immutable source revisions.",
+      "description": "Run an authenticated fail-closed Android test case with Mobilerun reasoning, vision, secure credentials and durable trajectory evidence.",
       "mode": "write",
-      "confirm": "Build any selected Android artifact and run the selected Camble tests on this agent?",
+      "confirm": "Build the exact Android artifact and let Mobilerun execute the authenticated test case with reasoning and vision?",
       "capabilities": ["git", "node"],
       "inputs": [
-        { "id": "environment", "label": "Environment", "type": "enum", "required": true, "options": [{ "value": "test.rulet.tv", "label": "test.rulet.tv" }, { "value": "peprod.rulet.tv", "label": "peprod.rulet.tv" }] },
-        { "id": "targets", "label": "Targets", "type": "multiselect", "required": true, "options": [{ "value": "Desktop", "label": "Desktop" }, { "value": "Chrome", "label": "Chrome" }, { "value": "Android", "label": "Android" }] },
+        { "id": "environment", "label": "Environment", "type": "enum", "required": true, "default": "test.rulet.tv", "options": [{ "value": "test.rulet.tv", "label": "test.rulet.tv" }, { "value": "peprod.rulet.tv", "label": "peprod.rulet.tv" }] },
+        { "id": "targets", "label": "Targets", "type": "multiselect", "required": true, "default": ["Android"], "options": [{ "value": "Android", "label": "Android · Mobilerun Thinking" }] },
         { "id": "device-id", "label": "Device ID", "type": "string", "required": false },
-        { "id": "comment", "label": "Comment", "type": "string", "required": false },
+        { "id": "comment", "label": "Тест-кейс", "type": "string", "required": true },
         { "id": "application-branch", "label": "Application branch", "type": "string", "required": false },
         { "id": "backend-branch", "label": "Backend branch", "type": "string", "required": false }
       ]

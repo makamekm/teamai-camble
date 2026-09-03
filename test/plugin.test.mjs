@@ -122,12 +122,14 @@ test("manifest is executable schema v2 with only declared action contract", asyn
     { id: "environment", type: "enum", required: true },
     { id: "targets", type: "multiselect", required: true },
     { id: "device-id", type: "string", required: false },
-    { id: "comment", type: "string", required: false },
+    { id: "comment", type: "string", required: true },
     { id: "application-branch", type: "string", required: false },
     { id: "backend-branch", type: "string", required: false },
   ]);
   assert.deepEqual(chatTest.inputs[0].options.map((item) => item.value), ["test.rulet.tv", "peprod.rulet.tv"]);
-  assert.deepEqual(chatTest.inputs[1].options.map((item) => item.value), ["Desktop", "Chrome", "Android"]);
+  assert.equal(chatTest.inputs[0].default, "test.rulet.tv");
+  assert.deepEqual(chatTest.inputs[1].options.map((item) => item.value), ["Android"]);
+  assert.deepEqual(chatTest.inputs[1].default, ["Android"]);
   assert.equal(JSON.stringify(manifest).includes("production"), false);
 });
 
@@ -673,8 +675,17 @@ function browserTestRunner(workspace, options = {}) {
   });
 }
 
+async function prepareMobilerunCaseHome(workspace) {
+  const home = path.join(workspace, "home");
+  const teamai = path.join(home, ".teamai");
+  const trajectoryRoot = path.join(teamai, "camble-mobilerun-trajectories");
+  await mkdir(trajectoryRoot, { recursive: true });
+  await writeFile(path.join(teamai, "camble-mobilerun-config.yaml"), "credentials:\n  enabled: true\n", { mode: 0o600 });
+  return { HOME: home };
+}
+
 function androidTestRunner(workspace, options = {}) {
-  let mobileUI = "chrome";
+  let mobileUI = "initial";
   let screenshotNumber = 0;
   return refsRunner({
     heads: {
@@ -706,13 +717,46 @@ function androidTestRunner(workspace, options = {}) {
         if (args[0] === "ping") return { code: options.failure === "ping" ? 1 : 0, stdout: "ready\n", stderr: "" };
         if (args[0] === "device" && args[1] === "install") return { code: options.failure === "install" ? 2 : 0, stdout: "installed\n", stderr: "" };
         if (args[0] === "device" && args[1] === "apps") return { code: 0, stdout: options.failure === "apps" ? "com.android.chrome\n" : "com.rulettv.app  (Camble)\ncom.android.chrome\n", stderr: "" };
-        if (args[0] === "device" && args[1] === "open-url") { mobileUI = "chrome"; return { code: options.failure === "mobile-run" ? 3 : 0, stdout: "done\n", stderr: "" }; }
-        if (args[0] === "device" && args[1] === "start") { mobileUI = "apk"; return { code: 0, stdout: "started\n", stderr: "" }; }
-        if (args[0] === "device" && args[1] === "ready") return { code: options.failure === "ready" ? 4 : 0, stdout: "ready\n", stderr: "" };
+        if (args[0] === "device" && args[1] === "start") { mobileUI = "initial"; return { code: 0, stdout: "started\n", stderr: "" }; }
+        if (args[0] === "run") {
+          if (options.failure !== "trajectory") {
+            const home = path.join(workspace, "home");
+            const directory = path.join(home, ".teamai", "camble-mobilerun-trajectories", "trajectory_20260903_120000");
+            const screenshots = path.join(directory, "screenshots");
+            await mkdir(screenshots, { recursive: true });
+            const actions = [
+              { action: "type_secret", secret_id: "CAMBLE_TEST_EMAIL" },
+              ...(options.failure === "credential-evidence" ? [] : [{ action: "type_secret", secret_id: "CAMBLE_TEST_PASSWORD" }]),
+              { action: "click_at", x: 1, y: 1 }, { action: "click_at", x: 2, y: 2 },
+              { action: "swipe", x1: 1, y1: 2, x2: 1, y2: 1 }, { action: "click_at", x: 3, y: 3 },
+              { action: "press_back" }, { action: "click_at", x: 4, y: 4 }, { action: "click_at", x: 5, y: 5 },
+            ];
+            await writeFile(path.join(directory, "macro.json"), JSON.stringify({ macro_schema_version: "1", version: "1", total_actions: actions.length, actions }));
+            await writeFile(path.join(directory, "trajectory.json"), JSON.stringify([{ type: "ResultEvent", success: options.failure !== "thinking" }]));
+            for (let index = 0; index < 4; index += 1) await writeFile(path.join(screenshots, `${String(index).padStart(4, "0")}.png`), `trajectory-screenshot-${index}`);
+          }
+          mobileUI = "final";
+          return { code: options.failure === "thinking" ? 3 : 0, stdout: "Mobilerun reasoning complete\n", stderr: "" };
+        }
+        if (args[0] === "device" && args[1] === "tap") {
+          const x = Number(args[4]);
+          mobileUI = options.failure === "button-noop" ? "target" : x < 250 ? "chat-result" : x < 450 ? "gift-result" : "closed";
+          return { code: 0, stdout: "tapped\n", stderr: "" };
+        }
+        if (args[0] === "device" && args[1] === "press") {
+          mobileUI = "target";
+          return { code: 0, stdout: "back\n", stderr: "" };
+        }
         if (args[0] === "device" && args[1] === "ui") {
-          const stdout = mobileUI === "chrome"
-            ? (options.failure === "mobile-evidence" ? "Chrome address bar example.invalid\n" : "Chrome address bar test.rulet.tv\n")
-            : (options.failure === "apk-ui" ? "" : "Camble application ready\n");
+          let stdout = "";
+          if (options.failure !== "apk-ui") {
+            if (mobileUI === "chat-result") stdout = '1. android.view.View: "Conversation with Eva" - (0,0,600,900)\n';
+            else if (mobileUI === "gift-result") stdout = '1. android.view.View: "Send a gift to Eva" - (0,0,600,900)\n';
+            else if (mobileUI === "closed") stdout = '1. android.view.View: "Feed Eva" - (0,0,600,900)\n';
+            else stdout = options.failure === "final-ui"
+              ? '1. android.view.View: "Eva" - (0,0,600,700)\n2. android.widget.Button: "Chat" - (100,800,200,900)\n'
+              : '1. android.view.View: "Eva" - (0,0,600,700)\n2. android.widget.Button: "Chat" - (100,800,200,900)\n3. android.widget.Button: "Gift" - (300,800,400,900)\n4. android.widget.Button: "Close" - (500,800,600,900)\n';
+          }
           return { code: 0, stdout, stderr: "" };
         }
         if (args[0] === "device" && args[1] === "screenshot") {
@@ -746,16 +790,18 @@ function androidTestRequest(workspace) {
   return value;
 }
 
-test("chat test validation is exact and rejects malformed input before any work", async () => {
+test("chat test validation requires an explicit Android case and rejects browser smoke targets before work", async () => {
   const workspace = await root();
-  const valid = { environment: "test.rulet.tv", targets: ["Desktop"] };
+  const valid = { environment: "test.rulet.tv", targets: ["Android"], comment: "verify the exact mobile bug" };
   const cases = [
     {},
-    { targets: ["Desktop"] },
-    { environment: "preprod.rulet.tv", targets: ["Desktop"] },
-    { environment: "test.rulet.tv", targets: [] },
-    { environment: "test.rulet.tv", targets: ["desktop"] },
-    { environment: "test.rulet.tv", targets: ["Chrome", "Chrome"] },
+    { targets: ["Android"], comment: valid.comment },
+    { environment: "preprod.rulet.tv", targets: ["Android"], comment: valid.comment },
+    { environment: "test.rulet.tv", targets: [], comment: valid.comment },
+    { environment: "test.rulet.tv", targets: ["Desktop"], comment: valid.comment },
+    { environment: "test.rulet.tv", targets: ["Chrome"], comment: valid.comment },
+    { environment: "test.rulet.tv", targets: ["android"], comment: valid.comment },
+    { ...valid, comment: "" },
     { ...valid, "device-id": "bad device" },
     { ...valid, "application-branch": "-main" },
     { ...valid, "backend-branch": "../main" },
@@ -771,97 +817,35 @@ test("chat test validation is exact and rejects malformed input before any work"
   }
 });
 
-test("Desktop and Chrome use real browser commands in stable order with HTTP, DOM and screenshot evidence", async () => {
+test("chat scheduler repository branch bindings remain the immutable Android source", async () => {
   const workspace = await root();
-  const runner = browserTestRunner(workspace);
-  const progress = [];
-  const fetchCalls = [];
-  const result = await execute(request("test", {
-    environment: "peprod.rulet.tv",
-    targets: ["Chrome", "Desktop"],
-    "application-branch": "feature/chat-test",
-    "backend-branch": "fix/chat-test",
-  }, workspace), {
-    runner,
-    chromePath: "chrome",
-    fetch: async (url) => { fetchCalls.push(url); return htmlResponse(url); },
-    progress: async (event) => progress.push(structuredClone(event)),
-    now: () => Date.UTC(2026, 8, 2, 12, 0, 0),
-  });
-  assert.equal(result.status, "ok");
-  assert.equal(result.output.deepLink, "https://peprod.rulet.tv/?env=peprod.rulet.tv");
-  assert.deepEqual(result.output.targets.map(({ target, status }) => ({ target, status })), [{ target: "Desktop", status: "passed" }, { target: "Chrome", status: "passed" }]);
-  assert.deepEqual(result.output.provenance.application, { repository: "application3", branch: "feature/chat-test", sha: C });
-  assert.deepEqual(result.output.provenance.backend, { repository: "backend", branch: "fix/chat-test", sha: D });
-  assert.equal(fetchCalls.length, 1);
-  assert.deepEqual(runner.calls.filter((call) => call.command === "chrome").map((call) => call.args.includes("--dump-dom") ? "dom" : call.args.some((item) => item.startsWith("--screenshot=")) ? "screenshot" : "version"), ["version", "dom", "screenshot", "dom", "screenshot"]);
-  assert.deepEqual(result.artifacts.map((item) => item.type), ["screenshot", "screenshot"]);
-  assert.equal(result.output.screenshots.length, 2);
-  assert.ok(result.output.screenshots.every((item) => /^[0-9a-f]{64}$/.test(item.sha256)));
-  assert.deepEqual(progress.map((item) => item.step.status), ["running", "passed", "running", "passed", "running", "passed", "running", "passed"]);
-  assert.equal(runner.calls.some((call) => call.command === "npm" || call.command === "mobilerun" || call.args[0] === "push"), false);
-});
-
-test("chat scheduler repository branch bindings are the default source of immutable provenance", async () => {
-  const workspace = await root();
-  const runner = browserTestRunner(workspace);
-  const value = request("test", { environment: "test.rulet.tv", targets: ["Desktop"] }, workspace);
+  const environment = await prepareMobilerunCaseHome(workspace);
+  const runner = androidTestRunner(workspace);
+  const value = androidTestRequest(workspace);
+  delete value.input["application-branch"];
+  delete value.input["backend-branch"];
   value.repositories = value.repositories.map((item) => ({ ...item, defaultBranch: item.id === "application3" ? "feature/chat-test" : "fix/chat-test" }));
-  const result = await execute(value, { runner, chromePath: "chrome", fetch: async (url) => htmlResponse(url) });
+  const result = await execute(value, { runner, apksignerPath: "apksigner", mobilerunPath: "mobilerun", environment, sleep: async () => {} });
   assert.equal(result.output.provenance.application.branch, "feature/chat-test");
   assert.equal(result.output.provenance.backend.branch, "fix/chat-test");
   assert.deepEqual(runner.calls.filter((call) => call.command === "git" && call.args[0] === "ls-remote").map((call) => call.args[2]), ["refs/heads/feature/chat-test", "refs/heads/fix/chat-test"]);
 });
 
-test("browser checks fail closed for missing Chrome, HTTP failure and browser error DOM", async () => {
-  const failures = [
-    {
-      name: "missing Chrome",
-      runner: (workspace) => browserTestRunner(workspace, { chromeMissing: true }),
-      fetch: async (url) => htmlResponse(url),
-      expectedStep: "resolve-chrome",
-      expected: /Chrome\/Chromium executable not found/,
-    },
-    {
-      name: "HTTP failure",
-      runner: (workspace) => browserTestRunner(workspace),
-      fetch: async (url) => htmlResponse(url, { status: 503 }),
-      expectedStep: "desktop",
-      expected: /HTTP check failed with status 503/,
-    },
-    {
-      name: "browser error DOM",
-      runner: (workspace) => browserTestRunner(workspace, { invalidDom: true }),
-      fetch: async (url) => htmlResponse(url),
-      expectedStep: "desktop",
-      expected: /Desktop DOM check failed/,
-    },
-  ];
-  for (const fixture of failures) {
-    const workspace = await root();
-    const runner = fixture.runner(workspace);
-    const result = await executeContract(request("test", { environment: "test.rulet.tv", targets: ["Desktop"] }, workspace), { runner, chromePath: "chrome", fetch: fixture.fetch });
-    assert.equal(result.response.status, "error", fixture.name);
-    assert.match(result.response.summary, fixture.expected, fixture.name);
-    assert.equal(result.response.output.status, "failed");
-    assert.equal(result.response.output.steps.find((item) => item.id === fixture.expectedStep).status, "failed");
-    assert.equal(result.exitCode, 1);
-  }
-});
-
-test("Android resolves exact branch SHAs, builds one immutable signed APK and tests mobile Chrome before the APK", async () => {
+test("Android uses Mobilerun reasoning, vision, secure credential IDs and durable trajectory evidence", async () => {
   const workspace = await root();
+  const environment = await prepareMobilerunCaseHome(workspace);
   const runner = androidTestRunner(workspace);
-  const result = await execute(androidTestRequest(workspace), { runner, apksignerPath: "apksigner", mobilerunPath: "mobilerun", environment: {} });
+  const result = await execute(androidTestRequest(workspace), { runner, apksignerPath: "apksigner", mobilerunPath: "mobilerun", environment, sleep: async () => {} });
   assert.equal(result.status, "ok");
+  assert.equal(result.summary, "Camble authenticated Mobilerun test case passed");
   assert.equal(result.output.status, "passed");
   assert.deepEqual(result.output.steps.map((item) => [item.id, item.status]), [
     ["resolve-sources", "passed"],
     ["build-android", "passed"],
     ["resolve-device", "passed"],
     ["install-android", "passed"],
-    ["mobile-chrome", "passed"],
-    ["installed-apk", "passed"],
+    ["mobilerun-thinking", "passed"],
+    ["verify-mobile-case", "passed"],
   ]);
   const apk = result.output.provenance.androidArtifact;
   assert.equal(apk.path, `artifacts/camble-${C}-${D}.apk`);
@@ -871,30 +855,56 @@ test("Android resolves exact branch SHAs, builds one immutable signed APK and te
   assert.equal(apk.backendSha, D);
   assert.equal((await stat(path.join(workspace, apk.path))).mode & 0o777, 0o400);
   assert.equal((await readFile(path.join(workspace, apk.path), "utf8")), "signed-apk-content");
-  assert.deepEqual(result.artifacts.map((item) => item.type), ["apk", "screenshot", "screenshot"]);
+  assert.equal(result.artifacts[0].type, "apk");
+  assert.equal(result.artifacts.filter((item) => item.type === "test-evidence").length, 2);
+  assert.equal(result.artifacts.filter((item) => item.type === "screenshot").length, 9);
+  assert.equal(result.output.screenshots.length, 9);
   assert.ok(result.output.screenshots.every((item) => /^[0-9a-f]{64}$/.test(item.sha256)));
-  const mobileOrder = runner.calls.filter((call) => call.command === "mobilerun").map((call) => call.args.slice(0, 2).join(" "));
-  assert.deepEqual(mobileOrder, ["--version", "devices", "ping -d", "device install", "device apps", "device open-url", "device ui", "device screenshot", "device start", "device ui", "device screenshot"]);
-  assert.deepEqual(runner.calls.filter((call) => call.command === "git" && call.args[0] === "ls-remote").map((call) => call.args[2]), ["refs/heads/feature/chat-test", "refs/heads/fix/chat-test"]);
+  const mobileCalls = runner.calls.filter((call) => call.command === "mobilerun");
+  assert.deepEqual(mobileCalls.slice(0, 8).map((call) => call.args.slice(0, 2).join(" ")), ["--version", "devices", "ping -d", "device install", "device apps", "device start", "device screenshot", "run -c"]);
+  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "tap").length, 3);
+  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "press").length, 2);
+  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "ui").length, 6);
+  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "screenshot").length, 5);
+  const thinking = mobileCalls.find((call) => call.args[0] === "run");
+  assert.ok(thinking.args.includes("--reasoning"));
+  assert.ok(thinking.args.includes("--vision"));
+  assert.ok(thinking.args.includes("--no-stream"));
+  assert.deepEqual(thinking.args.slice(thinking.args.indexOf("--steps"), thinking.args.indexOf("--steps") + 2), ["--steps", "80"]);
+  assert.match(thinking.args.at(-1), /CAMBLE_TEST_EMAIL/);
+  assert.match(thinking.args.at(-1), /CAMBLE_TEST_PASSWORD/);
+  assert.match(thinking.args.at(-1), /cookie\/privacy/);
+  assert.match(thinking.args.at(-1), /18\+/);
+  assert.match(thinking.args.at(-1), /Eva/);
+  assert.match(thinking.args.at(-1), /Chat.*Gift.*Close/);
+  const verification = result.output.steps.find((item) => item.id === "verify-mobile-case").evidence;
+  assert.deepEqual(verification.finalUiAssertions, ["eva", "chat", "gift", "close"]);
+  assert.deepEqual(verification.interactionAssertions.map((item) => item.control), ["chat", "gift", "close"]);
+  assert.ok(verification.interactionAssertions.every((item) => item.beforeUiSha256 !== item.afterUiSha256));
   assert.equal(runner.calls.some((call) => call.command === "git" && call.args[0] === "push"), false);
 });
 
-test("Android fails terminally for credentials, signing, device, install, deep-link and app evidence failures", async () => {
+test("Android fails terminally when credentials, signing, device, Mobilerun or target-screen evidence is missing", async () => {
   const cases = [
     { failure: "credentials", step: "build-android", message: /Missing ANDROID_UPLOAD_KEYSTORE_BASE64/ },
     { failure: "apksigner", step: "build-android", message: /apksigner executable not found/ },
     { failure: "signature", step: "build-android", message: /signature verification failed/ },
     { failure: "device", step: "resolve-device", message: /not in the fresh device list/ },
     { failure: "install", step: "install-android", message: /APK install failed/ },
-    { failure: "mobile-evidence", step: "mobile-chrome", message: /did not prove/ },
-    { failure: "apk-ui", step: "installed-apk", message: /empty UI tree/ },
+    { failure: "apps", step: "install-android", message: /was not reported/ },
+    { failure: "credential-evidence", step: "mobilerun-thinking", message: /does not prove use of the configured test account/ },
+    { failure: "thinking", step: "mobilerun-thinking", message: /did not complete successfully/ },
+    { failure: "apk-ui", step: "verify-mobile-case", message: /empty UI tree/ },
+    { failure: "final-ui", step: "verify-mobile-case", message: /does not expose gift with tappable bounds/ },
+    { failure: "button-noop", step: "verify-mobile-case", message: /chat tap did not change the UI/ },
   ];
   for (const fixture of cases) {
     const workspace = await root();
+    const environment = await prepareMobilerunCaseHome(workspace);
     const value = androidTestRequest(workspace);
     if (fixture.failure === "credentials") delete value.secrets.ANDROID_UPLOAD_KEYSTORE_BASE64;
     const runner = androidTestRunner(workspace, { failure: fixture.failure });
-    const result = await executeContract(value, { runner, apksignerPath: "apksigner", mobilerunPath: "mobilerun", environment: {} });
+    const result = await executeContract(value, { runner, apksignerPath: "apksigner", mobilerunPath: "mobilerun", environment, sleep: async () => {} });
     assert.equal(result.response.status, "error", fixture.failure);
     assert.match(result.response.summary, fixture.message, fixture.failure);
     assert.equal(result.response.output.status, "failed", fixture.failure);
