@@ -857,7 +857,7 @@ function androidTestRunner(workspace, options = {}) {
         if (args[0] === "device" && args[1] === "ui") {
           let stdout = "";
           if (options.failure !== "apk-ui") {
-            if (mobileUI === "feed") stdout = '1. android.view.View: "page_feed" - (0,0,600,900)\n2. android.view.View: "Eva" - (20,100,580,700)\n';
+            if (mobileUI === "feed") stdout = '1. android.view.ViewGroup: "page_feed" - (0,0,600,900)\n2. android.view.ViewGroup: "Eva, Online" - (20,100,580,700)\n';
             else if (mobileUI === "opening") {
               mobileUI = "target";
               stdout = '1. android.view.View: "Eva" - (0,0,600,700)\n';

@@ -1309,7 +1309,7 @@ async function ensureTargetMobileUi(mobile, deps, ui) {
         lastError = settledError;
       }
       if (!/["']page_feed["']/i.test(String(currentUi ?? ""))) throw lastError;
-      const eva = mobileControl(currentUi, "eva", /["']eva["']/i);
+      const eva = mobileControl(currentUi, "eva feed card", /ViewGroup:\s*["']Eva(?:,|["'])/i);
       await mobilerunCommand(mobile, deps, ["device", "tap", "-d", mobile.deviceId, String(eva.x), String(eva.y)], `reopen Eva from Feed attempt ${reopenAttempt}`);
       for (let captureAttempt = 1; captureAttempt <= 4; captureAttempt += 1) {
         await deps.sleep(1_000);
