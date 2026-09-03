@@ -1399,7 +1399,6 @@ async function cambleTest(request, deps) {
       });
       await runTestStep(lifecycle, "mobilerun-thinking", deps, async () => {
         const secure = await secureMobilerunCaseConfig(deps);
-        const before = await trajectoryDirectories(secure.trajectoryRoot);
         const clearedLogs = await deps.runner(adb, ["-s", mobile.deviceId, "logcat", "-c"], { allowFailure: true, timeoutMs: 30_000, maxOutput: 64 * 1024 });
         if (clearedLogs.code !== 0) fail("ADB failed to clear stale runtime logs before Chat Test");
         await mobilerunCommand(mobile, deps, ["device", "start", "-d", mobile.deviceId, built.packageName], "APK launch");
@@ -1408,12 +1407,24 @@ async function cambleTest(request, deps) {
         const runtimeHostProof = await proveAndroidRuntimeHost(request, deps, adb, mobile, built.packageName, input.environment);
         const initialScreenshot = await captureMobileScreenshot(request, deps, lifecycle, artifacts, mobile, "before-thinking");
         const prompt = authenticatedMobilerunPrompt(input, built.packageName);
-        const result = await deps.runner(mobile.executable, [
-          "run", "-c", secure.config, "-d", mobile.deviceId,
-          "--steps", "80", "--reasoning", "--vision", "--no-stream",
-          "--save-trajectory", "action", prompt,
-        ], { allowFailure: true, timeoutMs: 20 * 60_000, maxOutput: 2 * 1024 * 1024 });
-        const directory = await newMobilerunTrajectory(secure.trajectoryRoot, before, deps);
+        let result = null;
+        let directory = null;
+        let mobilerunAttempts = 0;
+        while (mobilerunAttempts < 2 && !directory) {
+          mobilerunAttempts += 1;
+          const beforeAttempt = await trajectoryDirectories(secure.trajectoryRoot);
+          result = await deps.runner(mobile.executable, [
+            "run", "-c", secure.config, "-d", mobile.deviceId,
+            "--steps", "80", "--reasoning", "--vision", "--no-stream",
+            "--save-trajectory", "action", prompt,
+          ], { allowFailure: true, timeoutMs: 20 * 60_000, maxOutput: 2 * 1024 * 1024 });
+          try {
+            directory = await newMobilerunTrajectory(secure.trajectoryRoot, beforeAttempt, deps);
+          } catch (error) {
+            if (mobilerunAttempts >= 2) throw error;
+            await deps.sleep(1_000);
+          }
+        }
         trajectoryEvidence = await collectMobilerunTrajectory(directory);
         const rawTerminalVerdict = await collectMobilerunTerminalVerdict(directory);
         const terminalVerdict = rawTerminalVerdict
@@ -1425,6 +1436,7 @@ async function cambleTest(request, deps) {
           mode: "reasoning",
           vision: true,
           maxSteps: 80,
+          mobilerunAttempts,
           attemptedCredentialIds: trajectoryEvidence.secretIds,
           selectedEnvironment: input.environment,
           runtimeHost: expectedHost,

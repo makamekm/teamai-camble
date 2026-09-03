@@ -736,6 +736,7 @@ async function prepareMobilerunCaseHome(workspace) {
 function androidTestRunner(workspace, options = {}) {
   let mobileUI = "initial";
   let screenshotNumber = 0;
+  let mobilerunRuns = 0;
   const signedApkContent = options.failure === "runtime-host"
     ? "signed-apk-content https://stage.rulet.tv"
     : "signed-apk-content https://test.rulet.tv";
@@ -801,7 +802,10 @@ function androidTestRunner(workspace, options = {}) {
         if (args[0] === "device" && args[1] === "apps") return { code: 0, stdout: options.failure === "apps" ? "com.android.chrome\n" : "com.rulettv.app  (Camble)\ncom.android.chrome\n", stderr: "" };
         if (args[0] === "device" && args[1] === "start") { mobileUI = "initial"; return { code: 0, stdout: "started\n", stderr: "" }; }
         if (args[0] === "run") {
-          if (options.failure !== "trajectory") {
+          mobilerunRuns += 1;
+          const omitTrajectory = options.failure === "trajectory"
+            || (options.failure === "trajectory-once" && mobilerunRuns === 1);
+          if (!omitTrajectory) {
             const home = path.join(workspace, "home");
             const directory = path.join(home, ".teamai", "camble-mobilerun-trajectories", "trajectory_20260903_120000");
             const screenshots = path.join(directory, "screenshots");
@@ -828,7 +832,7 @@ function androidTestRunner(workspace, options = {}) {
             for (let index = 0; index < 4; index += 1) await writeFile(path.join(screenshots, `${String(index).padStart(4, "0")}.png`), `trajectory-screenshot-${index}`);
           }
           mobileUI = "final";
-          return { code: new Set(["thinking", "existing-account-mismatch", "terminal-reason"]).has(options.failure) ? 3 : 0, stdout: "Mobilerun reasoning complete\n", stderr: "" };
+          return { code: omitTrajectory || new Set(["thinking", "existing-account-mismatch", "terminal-reason"]).has(options.failure) ? 3 : 0, stdout: "Mobilerun reasoning complete\n", stderr: "" };
         }
         if (args[0] === "device" && args[1] === "tap") {
           const x = Number(args[4]);
@@ -996,6 +1000,17 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   assert.deepEqual(verification.interactionAssertions.map((item) => item.control), ["chat", "gift", "close"]);
   assert.ok(verification.interactionAssertions.every((item) => item.beforeUiSha256 !== item.afterUiSha256));
   assert.equal(runner.calls.some((call) => call.command === "git" && call.args[0] === "push"), false);
+});
+
+test("Android retries Mobilerun once only when the first attempt produces no durable trajectory", async () => {
+  const workspace = await root();
+  const environment = await prepareMobilerunCaseHome(workspace);
+  const runner = androidTestRunner(workspace, { failure: "trajectory-once" });
+  const result = await execute(androidTestRequest(workspace), { runner, apksignerPath: "apksigner", mobilerunPath: "mobilerun", environment, sleep: async () => {} });
+  assert.equal(result.status, "ok");
+  const mobilerunRuns = runner.calls.filter((call) => call.command === "mobilerun" && call.args[0] === "run");
+  assert.equal(mobilerunRuns.length, 2);
+  assert.equal(result.output.steps.find((item) => item.id === "mobilerun-thinking").evidence.mobilerunAttempts, 2);
 });
 
 test("Android fails terminally when credentials, signing, device, Mobilerun or target-screen evidence is missing", async () => {
