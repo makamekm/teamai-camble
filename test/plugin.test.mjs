@@ -702,7 +702,13 @@ function androidTestRunner(workspace, options = {}) {
       await mkdir(path.join(target, "src", "state"), { recursive: true });
       await writeFile(path.join(target, "app.json"), JSON.stringify({ expo: { version: "5.2.0-test.1", android: { versionCode: 73, package: "com.rulettv.app" }, ios: { buildNumber: "73" } } }));
       await writeFile(path.join(target, "android", "gradle.properties"), "org.gradle.daemon=false\n");
-      await writeFile(path.join(target, "src", "state", "firebase.native.ts"), 'state.config.next({ "host": "https://prod.rulet.tv", "stage_host": "https://stage.rulet.tv", "stage": false });\n');
+      await writeFile(path.join(target, "src", "state", "firebase.native.ts"), [
+        'state.config.next({ "host": "https://prod.rulet.tv", "stage_host": "https://stage.rulet.tv", "stage": false });',
+        'state.config.next({ ...state.config.value, ...parseRemoteConfigValues(), });',
+        'console.log("Config:", state.config.value);',
+        'state.config.next({ ...state.config.value, ...parseRemoteConfigValues(), });',
+        '',
+      ].join('\n'));
     },
     handler: async (command, args, commandOptions) => {
       if (command === "./gradlew" || command === "gradlew.bat") {
@@ -730,7 +736,13 @@ function androidTestRunner(workspace, options = {}) {
           await writeFile(args.at(-1), options.failure === "installed-artifact" ? "different installed apk" : signedApkContent);
           return { code: 0, stdout: "1 file pulled\n", stderr: "" };
         }
-        if (args.includes("logcat")) return { code: 0, stdout: "", stderr: "" };
+        if (args.includes("pidof")) return { code: options.failure === "runtime-pid" ? 1 : 0, stdout: options.failure === "runtime-pid" ? "" : "4242\n", stderr: "" };
+        if (args.includes("logcat")) {
+          if (args.includes("-c")) return { code: options.failure === "logcat-clear" ? 1 : 0, stdout: "", stderr: "" };
+          const runtimeHost = options.failure === "runtime-config" ? "https://stage.rulet.tv" : "https://test.rulet.tv";
+          const runtimeMarker = options.failure === "runtime-marker" ? "Config:" : "TEAMAI_CHAT_TEST_RUNTIME_CONFIG";
+          return { code: 0, stdout: `[com.rulettv.app] ${runtimeMarker} {"host":"${runtimeHost}","stage_host":"${runtimeHost}","stage":false}\n`, stderr: "" };
+        }
       }
       if (command === "mobilerun") {
         if (args[0] === "--version") return { code: 0, stdout: "mobilerun 1.0\n", stderr: "" };
@@ -876,6 +888,10 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   assert.equal(apk.backendSha, D);
   assert.equal(apk.testHostOverlay.target, "https://test.rulet.tv");
   assert.notEqual(apk.testHostOverlay.beforeSha256, apk.testHostOverlay.afterSha256);
+  const patchedFirebase = await readFile(path.join(workspace, "chat-test-android", "application", "src", "state", "firebase.native.ts"), "utf8");
+  const remoteConfigOverrides = patchedFirebase.match(/\.\.\.parseRemoteConfigValues\(\),\s*(?:\/\/[^\n]*\n\s*)?"host": "https:\/\/test\.rulet\.tv",\s*"stage_host": "https:\/\/test\.rulet\.tv",\s*"stage": false,/gs) || [];
+  assert.equal(remoteConfigOverrides.length, 2, "selected host must override both Firebase Remote Config merges");
+  assert.match(patchedFirebase, /TEAMAI_CHAT_TEST_RUNTIME_CONFIG.*JSON\.stringify/s);
   assert.deepEqual(apk.testHostArtifact, { selectedHost: "https://test.rulet.tv", observedHosts: ["https://test.rulet.tv"], conflictingHostsAbsent: true, method: "compiled-apk-content" });
   assert.equal((await stat(path.join(workspace, apk.path))).mode & 0o777, 0o400);
   assert.equal((await readFile(path.join(workspace, apk.path), "utf8")), "signed-apk-content https://test.rulet.tv");
@@ -887,7 +903,7 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   const mobileCalls = runner.calls.filter((call) => call.command === "mobilerun");
   assert.deepEqual(mobileCalls.slice(0, 6).map((call) => call.args.slice(0, 2).join(" ")), ["--version", "devices", "ping -d", "device start", "device screenshot", "run -c"]);
   const adbCalls = runner.calls.filter((call) => call.command === "adb");
-  assert.deepEqual(adbCalls.map((call) => call.args.includes("install") ? "install" : call.args.includes("clear") ? "clear-state" : call.args.includes("dumpsys") ? "verify-package" : call.args.includes("pm") && call.args.includes("path") ? "resolve-installed-apk" : call.args.includes("pull") ? "read-installed-apk" : call.args.includes("-c") ? "clear-log" : "version"), ["version", "install", "clear-state", "verify-package", "resolve-installed-apk", "read-installed-apk", "clear-log"]);
+  assert.deepEqual(adbCalls.map((call) => call.args.includes("install") ? "install" : call.args.includes("clear") ? "clear-state" : call.args.includes("dumpsys") ? "verify-package" : call.args.includes("pm") && call.args.includes("path") ? "resolve-installed-apk" : call.args.includes("pull") ? "read-installed-apk" : call.args.includes("-c") ? "clear-log" : call.args.includes("pidof") ? "runtime-pid" : call.args.includes("logcat") ? "runtime-host" : "version"), ["version", "install", "clear-state", "verify-package", "resolve-installed-apk", "read-installed-apk", "clear-log", "runtime-pid", "runtime-host"]);
   const installedArtifact = result.output.steps.find((item) => item.id === "install-android").evidence.installedArtifact;
   assert.equal(installedArtifact.installedSha256, apk.sha256);
   assert.equal(installedArtifact.matchesBuiltArtifact, true);
@@ -908,6 +924,14 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   assert.match(thinking.args.at(-1), /Eva/);
   assert.match(thinking.args.at(-1), /Chat.*Gift.*Close/);
   assert.equal(result.output.steps.find((item) => item.id === "mobilerun-thinking").evidence.runtimeHost, "https://test.rulet.tv");
+  assert.deepEqual(result.output.steps.find((item) => item.id === "mobilerun-thinking").evidence.runtimeHostProof.runtime, {
+    method: "android-logcat-config",
+    processId: 4242,
+    selectedHost: "https://test.rulet.tv",
+    host: "https://test.rulet.tv",
+    stageHost: "https://test.rulet.tv",
+    stage: false,
+  });
   const verification = result.output.steps.find((item) => item.id === "verify-mobile-case").evidence;
   assert.deepEqual(verification.finalUiAssertions, ["eva", "chat", "gift", "close"]);
   assert.deepEqual(verification.interactionAssertions.map((item) => item.control), ["chat", "gift", "close"]);
@@ -927,6 +951,10 @@ test("Android fails terminally when credentials, signing, device, Mobilerun or t
     { failure: "version", step: "install-android", message: /did not match the built version/ },
     { failure: "runtime-host", step: "build-android", message: /does not contain the selected test.rulet.tv backend/ },
     { failure: "installed-artifact", step: "install-android", message: /does not match the exact signed Chat Test artifact/ },
+    { failure: "logcat-clear", step: "mobilerun-thinking", message: /failed to clear stale runtime logs/ },
+    { failure: "runtime-pid", step: "mobilerun-thinking", message: /process com.rulettv.app was not found/ },
+    { failure: "runtime-config", step: "mobilerun-thinking", message: /selected a runtime backend conflicting with test.rulet.tv/ },
+    { failure: "runtime-marker", step: "mobilerun-thinking", message: /did not emit runtime backend config for test.rulet.tv/ },
     { failure: "credential-evidence", step: "mobilerun-thinking", message: /does not prove use of the configured test account/ },
     { failure: "thinking", step: "mobilerun-thinking", message: /did not complete successfully/ },
     { failure: "apk-ui", step: "verify-mobile-case", message: /empty UI tree/ },

@@ -649,12 +649,31 @@ async function applyAndroidTestHostOverlay(applicationRoot, environment) {
   const replacements = [
     [/(["']host["']\s*:\s*)["']https:\/\/prod\.rulet\.tv["']/, `$1"${target}"`],
     [/(["']stage_host["']\s*:\s*)["']https:\/\/stage\.rulet\.tv["']/, `$1"${target}"`],
-    [/(["']stage["']\s*:\s*)false/, "$1true"],
   ];
   for (const [pattern, replacement] of replacements) {
     if (!pattern.test(after)) fail("Android test host overlay no longer matches firebase.native.ts");
     after = after.replace(pattern, replacement);
   }
+  const remoteMerge = /([ \t]*)\.\.\.parseRemoteConfigValues\(\),/g;
+  const remoteMerges = [...after.matchAll(remoteMerge)].length;
+  if (remoteMerges !== 2) fail("Android test host overlay no longer matches both Firebase Remote Config merges");
+  after = after.replace(remoteMerge, (_match, indent) => [
+    `${indent}...parseRemoteConfigValues(),`,
+    `${indent}// TeamAI Chat Test must win over cached and live Firebase Remote Config.`,
+    `${indent}"host": "${target}",`,
+    `${indent}"stage_host": "${target}",`,
+    `${indent}"stage": false,`,
+  ].join("\n"));
+  const configLog = /([ \t]*)console\.log\("Config:", state\.config\.value\);/;
+  if (!configLog.test(after)) fail("Android test host overlay no longer matches the runtime Config log");
+  after = after.replace(configLog, (_match, indent) => [
+    `${indent}console.log("TEAMAI_CHAT_TEST_RUNTIME_CONFIG " + JSON.stringify({`,
+    `${indent}  host: state.config.value.host,`,
+    `${indent}  stage_host: state.config.value.stage_host,`,
+    `${indent}  stage: state.config.value.stage,`,
+    `${indent}}));`,
+    `${indent}console.log("Config:", state.config.value);`,
+  ].join("\n"));
   await writeFile(source, after, { mode: 0o600 });
   return {
     environment,
@@ -663,6 +682,71 @@ async function applyAndroidTestHostOverlay(applicationRoot, environment) {
     beforeSha256: createHash("sha256").update(before, "utf8").digest("hex"),
     afterSha256: createHash("sha256").update(after, "utf8").digest("hex"),
   };
+}
+
+function normalizeRuntimeHost(value) {
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || (parsed.pathname !== "/" && parsed.pathname !== "")) return null;
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return null;
+  }
+}
+
+function runtimeConfigFromLogcat(logcat) {
+  const rows = `${logcat ?? ""}`.split(/\r?\n/).reverse();
+  for (const row of rows) {
+    const source = /\bTEAMAI_CHAT_TEST_RUNTIME_CONFIG\s+(\{.*\})\s*$/.exec(row)?.[1];
+    if (!source) continue;
+    try {
+      const config = JSON.parse(source);
+      return {
+        host: normalizeRuntimeHost(config.host),
+        stageHost: normalizeRuntimeHost(config.stage_host),
+        stage: config.stage,
+      };
+    } catch {
+      // Keep looking for an earlier complete runtime marker.
+    }
+  }
+  return null;
+}
+
+async function proveAndroidRuntimeHost(request, deps, adb, mobile, packageName, environment) {
+  const expectedHost = nativeTestHost(environment);
+  let processId = null;
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const process = await deps.runner(adb, ["-s", mobile.deviceId, "shell", "pidof", packageName], {
+      allowFailure: true,
+      timeoutMs: 30_000,
+      maxOutput: 64 * 1024,
+    });
+    const candidate = process.stdout.trim().split(/\s+/)[0];
+    if (process.code === 0 && /^\d+$/.test(candidate)) {
+      processId = candidate;
+      break;
+    }
+    await deps.sleep(1_000);
+  }
+  if (!processId) fail(`Running APK process ${packageName} was not found for runtime backend verification`);
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const logs = await deps.runner(adb, ["-s", mobile.deviceId, "logcat", "-d", "--pid", processId, "-v", "brief", "-t", "4000"], {
+      allowFailure: true,
+      timeoutMs: 30_000,
+      maxOutput: 2 * 1024 * 1024,
+    });
+    const config = logs.code === 0 ? runtimeConfigFromLogcat(logs.stdout) : null;
+    if (config) {
+      if (config.host !== expectedHost || config.stageHost !== expectedHost || config.stage !== false) {
+        fail(`Running APK selected a runtime backend conflicting with ${environment}`);
+      }
+      return { method: "android-logcat-config", processId: Number(processId), selectedHost: expectedHost, ...config };
+    }
+    await deps.sleep(1_000);
+  }
+  fail(`Running APK did not emit runtime backend config for ${environment}`);
 }
 function testStepDefinitions(targets) {
   const definitions = [{ id: "resolve-sources", label: "Resolve immutable source SHAs", target: null }];
@@ -1220,10 +1304,12 @@ async function cambleTest(request, deps) {
       await runTestStep(lifecycle, "mobilerun-thinking", deps, async () => {
         const secure = await secureMobilerunCaseConfig(deps);
         const before = await trajectoryDirectories(secure.trajectoryRoot);
-        await deps.runner(adb, ["-s", mobile.deviceId, "logcat", "-c"], { allowFailure: true, timeoutMs: 30_000, maxOutput: 64 * 1024 });
+        const clearedLogs = await deps.runner(adb, ["-s", mobile.deviceId, "logcat", "-c"], { allowFailure: true, timeoutMs: 30_000, maxOutput: 64 * 1024 });
+        if (clearedLogs.code !== 0) fail("ADB failed to clear stale runtime logs before Chat Test");
         await mobilerunCommand(mobile, deps, ["device", "start", "-d", mobile.deviceId, built.packageName], "APK launch");
         const expectedHost = nativeTestHost(input.environment);
         if (built.testHostArtifact?.selectedHost !== expectedHost) fail(`Running APK did not prove the selected ${input.environment} backend`);
+        const runtimeHostProof = await proveAndroidRuntimeHost(request, deps, adb, mobile, built.packageName, input.environment);
         const initialScreenshot = await captureMobileScreenshot(request, deps, lifecycle, artifacts, mobile, "before-thinking");
         const prompt = authenticatedMobilerunPrompt(input, built.packageName);
         const result = await deps.runner(mobile.executable, [
@@ -1243,7 +1329,10 @@ async function cambleTest(request, deps) {
           authenticatedWithCredentialIds: CAMBLE_MOBILERUN_SECRET_IDS,
           selectedEnvironment: input.environment,
           runtimeHost: expectedHost,
-          runtimeHostProof: { method: "installed-apk-sha256-and-compiled-content", artifactSha256: built.apkSha256, backend: built.testHostArtifact },
+          runtimeHostProof: {
+            runtime: runtimeHostProof,
+            installedArtifact: { method: "installed-apk-sha256-and-compiled-content", artifactSha256: built.apkSha256, backend: built.testHostArtifact },
+          },
           initialScreenshot,
           trajectory: trajectoryEvidence,
         };
