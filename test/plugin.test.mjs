@@ -711,6 +711,10 @@ function androidTestRunner(workspace, options = {}) {
         if (args[0] === "version") return { code: options.failure === "apksigner" ? 1 : 0, stdout: "0.9\n", stderr: "" };
         return { code: options.failure === "signature" ? 1 : 0, stdout: `Verifies\nSigner #1 certificate SHA-256 digest: ${"3".repeat(64)}\n`, stderr: "" };
       }
+      if (command === "rustup") {
+        if (args[0] === "--version") return { code: 0, stdout: "rustup 1.29.0\n", stderr: "" };
+        return { code: options.failure === "rust-toolchain" ? 1 : 0, stdout: "stable-test (default)\n", stderr: "" };
+      }
       if (command === "mobilerun") {
         if (args[0] === "--version") return { code: 0, stdout: "mobilerun 1.0\n", stderr: "" };
         if (args[0] === "devices") return { code: 0, stdout: options.failure === "device" ? "No local devices connected.\n" : "Found 1 local device(s):\n  • DEVICE-1\n", stderr: "" };
@@ -887,6 +891,7 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
 test("Android fails terminally when credentials, signing, device, Mobilerun or target-screen evidence is missing", async () => {
   const cases = [
     { failure: "credentials", step: "build-android", message: /Missing ANDROID_UPLOAD_KEYSTORE_BASE64/ },
+    { failure: "rust-toolchain", step: "build-android", message: /no active toolchain/ },
     { failure: "apksigner", step: "build-android", message: /apksigner executable not found/ },
     { failure: "signature", step: "build-android", message: /signature verification failed/ },
     { failure: "device", step: "resolve-device", message: /not in the fresh device list/ },
@@ -910,7 +915,7 @@ test("Android fails terminally when credentials, signing, device, Mobilerun or t
     assert.equal(result.response.output.status, "failed", fixture.failure);
     assert.equal(result.response.output.steps.find((item) => item.id === fixture.step).status, "failed", fixture.failure);
     assert.equal(result.response.output.verdict, "failed", fixture.failure);
-    if (["credentials", "apksigner", "signature"].includes(fixture.failure)) {
+    if (["credentials", "rust-toolchain", "apksigner", "signature"].includes(fixture.failure)) {
       assert.equal(result.response.artifacts.length, 0, fixture.failure);
     } else {
       assert.equal(result.response.artifacts[0]?.type, "apk", `${fixture.failure} must retain immutable APK evidence`);

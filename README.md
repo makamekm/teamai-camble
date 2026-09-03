@@ -29,7 +29,7 @@ Required Android secrets for a real build:
 
 Optional Play upload secret: `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`. `version-apply` requires the scoped repository/GitHub token supplied by the agent.
 
-Real Android chat tests additionally require `apksigner`, a compatible installed `mobilerun` CLI/device, and mode-0600 `$HOME/.teamai/camble-mobilerun-config.yaml`. That config must enable a mode-0600 credentials file exposing `CAMBLE_TEST_EMAIL` and `CAMBLE_TEST_PASSWORD` to Mobilerun's `type_secret` tool without putting credential values in prompts, plugin inputs, logs, Git, or TeamAI durable state. `$HOME/.teamai/camble-mobilerun-trajectories` must resolve to a writable directory; large trajectory data should live on external storage.
+Real Android chat tests additionally require `apksigner`, an active `rustup` toolchain for native video effects, a compatible installed `mobilerun` CLI/device, and mode-0600 `$HOME/.teamai/camble-mobilerun-config.yaml`. That config must enable a mode-0600 credentials file exposing `CAMBLE_TEST_EMAIL` and `CAMBLE_TEST_PASSWORD` to Mobilerun's `type_secret` tool without putting credential values in prompts, plugin inputs, logs, Git, or TeamAI durable state. `$HOME/.teamai/camble-mobilerun-trajectories` must resolve to a writable directory; large trajectory data should live on external storage.
 
 ## Verification
 

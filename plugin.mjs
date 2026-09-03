@@ -486,6 +486,9 @@ async function buildSignedAndroid(request, deps, options) {
   const buildRoot = path.join(root, options.directory);
   const applicationRoot = path.join(buildRoot, "application");
   const backendRoot = path.join(buildRoot, "backend");
+  const rustup = await executableCandidate(deps.runner, [deps.rustupPath, request.tools?.rustup, "rustup"], ["--version"], "Rustup");
+  const rustToolchain = await deps.runner(rustup, ["show", "active-toolchain"], { allowFailure: true, timeoutMs: 30_000, maxOutput: 64 * 1024 });
+  if (rustToolchain.code !== 0) fail("Rustup has no active toolchain for Android native modules");
   await cloneExact(deps.runner, repository(request, "application3"), options.applicationSha, applicationRoot);
   await cloneExact(deps.runner, repository(request, "backend"), options.backendSha, backendRoot);
   await deps.runner("npm", ["ci", "--no-audit", "--no-fund"], { cwd: applicationRoot, timeoutMs: 10 * 60 * 1000 });
@@ -1562,6 +1565,7 @@ export async function execute(request, overrides = {}) {
     chromePath: overrides.chromePath,
     mobilerunPath: overrides.mobilerunPath,
     apksignerPath: overrides.apksignerPath,
+    rustupPath: overrides.rustupPath,
     platform,
     environment,
   };
