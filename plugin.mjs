@@ -1286,6 +1286,20 @@ function assertFinalMobileCaseUi(ui) {
   return { assertions: ["eva", ...controls.map((control) => control.id)], controls };
 }
 
+async function ensureTargetMobileUi(mobile, deps, ui) {
+  try {
+    return { ui, target: assertFinalMobileCaseUi(ui), reopenedFromFeed: false };
+  } catch (error) {
+    if (!/["']page_feed["']/i.test(String(ui ?? ""))) throw error;
+    const eva = mobileControl(ui, "eva", /["']eva["']/i);
+    await mobilerunCommand(mobile, deps, ["device", "tap", "-d", mobile.deviceId, String(eva.x), String(eva.y)], "reopen Eva from Feed");
+    await deps.sleep(1_500);
+    const reopened = await mobilerunCommand(mobile, deps, ["device", "ui", "-d", mobile.deviceId], "reopened Eva UI");
+    if (!reopened.stdout.trim()) fail("Installed APK returned an empty UI tree after reopening Eva");
+    return { ui: reopened.stdout, target: assertFinalMobileCaseUi(reopened.stdout), reopenedFromFeed: true };
+  }
+}
+
 function uiEvidenceHash(value) {
   return createHash("sha256").update(String(value ?? ""), "utf8").digest("hex");
 }
@@ -1466,9 +1480,10 @@ async function cambleTest(request, deps) {
       await runTestStep(lifecycle, "verify-mobile-case", deps, async () => {
         const ui = await mobilerunCommand(mobile, deps, ["device", "ui", "-d", mobile.deviceId], "APK UI verification");
         if (!ui.stdout.trim()) fail("Installed APK returned an empty UI tree");
-        const target = assertFinalMobileCaseUi(ui.stdout);
+        const stabilized = await ensureTargetMobileUi(mobile, deps, ui.stdout);
+        const target = stabilized.target;
         const targetScreenshot = await captureMobileScreenshot(request, deps, lifecycle, artifacts, mobile, "target-before-buttons");
-        const chatReaction = await verifyButtonReaction(request, deps, lifecycle, artifacts, mobile, ui.stdout, target.controls.find((control) => control.id === "chat"), "chat-reaction");
+        const chatReaction = await verifyButtonReaction(request, deps, lifecycle, artifacts, mobile, stabilized.ui, target.controls.find((control) => control.id === "chat"), "chat-reaction");
         const afterChat = await returnToTargetMobileUi(mobile, deps, "chat");
         const giftReaction = await verifyButtonReaction(request, deps, lifecycle, artifacts, mobile, afterChat.ui, afterChat.target.controls.find((control) => control.id === "gift"), "gift-reaction");
         const afterGift = await returnToTargetMobileUi(mobile, deps, "gift");
@@ -1481,6 +1496,7 @@ async function cambleTest(request, deps) {
           finalUiAssertions: target.assertions,
           trajectoryActionCount: trajectoryEvidence.actionCount,
           targetScreenshot,
+          reopenedFromFeed: stabilized.reopenedFromFeed,
           interactionAssertions: [chatReaction, giftReaction, closeReaction],
         };
       });
