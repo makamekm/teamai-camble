@@ -759,17 +759,27 @@ function androidTestRunner(workspace, options = {}) {
             await mkdir(screenshots, { recursive: true });
             const actions = [
               { action: "type_secret", secret_id: "CAMBLE_TEST_EMAIL" },
-              ...(options.failure === "credential-evidence" ? [] : [{ action: "type_secret", secret_id: "CAMBLE_TEST_PASSWORD" }]),
+              ...(new Set(["credential-evidence", "existing-account-mismatch"]).has(options.failure) ? [] : [{ action: "type_secret", secret_id: "CAMBLE_TEST_PASSWORD" }]),
               { action: "click_at", x: 1, y: 1 }, { action: "click_at", x: 2, y: 2 },
               { action: "swipe", x1: 1, y1: 2, x2: 1, y2: 1 }, { action: "click_at", x: 3, y: 3 },
               { action: "press_back" }, { action: "click_at", x: 4, y: 4 }, { action: "click_at", x: 5, y: 5 },
             ];
             await writeFile(path.join(directory, "macro.json"), JSON.stringify({ macro_schema_version: "1", version: "1", total_actions: actions.length, actions }));
-            await writeFile(path.join(directory, "trajectory.json"), JSON.stringify([{ type: "ResultEvent", success: options.failure !== "thinking" }]));
+            const terminal = options.failure === "existing-account-mismatch"
+              ? { type: "ManagerPlanDetailsEvent", success: false, answer: "The provided email is not recognized as an existing account and the flow is attempting to create a new password." }
+              : options.failure === "terminal-reason"
+                ? { type: "ManagerPlanDetailsEvent", success: false, answer: "The target profile could not be reached." }
+                : options.failure === "terminal-missing"
+                  ? { type: "ManagerPlanDetailsEvent", success: null, answer: "" }
+                  : { type: "ResultEvent", success: options.failure !== "thinking", answer: options.failure === "thinking" ? "The autonomous case failed." : "" };
+            const trajectory = options.failure === "terminal-missing"
+              ? [{ type: "ResultEvent", success: true, answer: "Premature result" }, terminal]
+              : [terminal];
+            await writeFile(path.join(directory, "trajectory.json"), JSON.stringify(trajectory));
             for (let index = 0; index < 4; index += 1) await writeFile(path.join(screenshots, `${String(index).padStart(4, "0")}.png`), `trajectory-screenshot-${index}`);
           }
           mobileUI = "final";
-          return { code: options.failure === "thinking" ? 3 : 0, stdout: "Mobilerun reasoning complete\n", stderr: "" };
+          return { code: new Set(["thinking", "existing-account-mismatch", "terminal-reason"]).has(options.failure) ? 3 : 0, stdout: "Mobilerun reasoning complete\n", stderr: "" };
         }
         if (args[0] === "device" && args[1] === "tap") {
           const x = Number(args[4]);
@@ -956,7 +966,10 @@ test("Android fails terminally when credentials, signing, device, Mobilerun or t
     { failure: "runtime-config", step: "mobilerun-thinking", message: /selected a runtime backend conflicting with test.rulet.tv/ },
     { failure: "runtime-marker", step: "mobilerun-thinking", message: /did not emit runtime backend config for test.rulet.tv/ },
     { failure: "credential-evidence", step: "mobilerun-thinking", message: /does not prove use of the configured test account/ },
-    { failure: "thinking", step: "mobilerun-thinking", message: /did not complete successfully/ },
+    { failure: "thinking", step: "mobilerun-thinking", message: /The autonomous case failed/ },
+    { failure: "existing-account-mismatch", step: "mobilerun-thinking", message: /existing-account environment mismatch: The provided email is not recognized as an existing account and the flow is attempting to create a new password/ },
+    { failure: "terminal-reason", step: "mobilerun-thinking", message: /Mobilerun terminal failure: The target profile could not be reached/ },
+    { failure: "terminal-missing", step: "mobilerun-thinking", message: /did not produce a terminal verdict/ },
     { failure: "apk-ui", step: "verify-mobile-case", message: /empty UI tree/ },
     { failure: "final-ui", step: "verify-mobile-case", message: /does not expose gift with tappable bounds/ },
     { failure: "button-noop", step: "verify-mobile-case", message: /chat tap did not change the UI/ },
@@ -974,6 +987,13 @@ test("Android fails terminally when credentials, signing, device, Mobilerun or t
     assert.equal(result.response.output.steps.find((item) => item.id === fixture.step).status, "failed", fixture.failure);
     assert.equal(result.response.output.verdict, "failed", fixture.failure);
     assert.equal(result.response.artifacts.length, 0, `${fixture.failure} failure must not be replaced by a secondary artifact transport error`);
+    if (new Set(["thinking", "existing-account-mismatch", "terminal-reason", "terminal-missing", "credential-evidence"]).has(fixture.failure)) {
+      const evidence = result.response.output.steps.find((item) => item.id === "mobilerun-thinking").evidence;
+      assert.equal(evidence.trajectory.evidenceFiles.length, 2, `${fixture.failure} must retain trajectory hashes`);
+      assert.equal(evidence.trajectory.screenshotEvidence.length, 4, `${fixture.failure} must retain screenshot hashes`);
+      assert.ok(evidence.trajectory.evidenceFiles.every((item) => /^[0-9a-f]{64}$/.test(item.sha256)));
+      assert.ok(evidence.trajectory.screenshotEvidence.every((item) => /^[0-9a-f]{64}$/.test(item.sha256)));
+    }
     assert.equal(result.exitCode, 1, fixture.failure);
   }
 });

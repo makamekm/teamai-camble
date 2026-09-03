@@ -786,6 +786,10 @@ async function runTestStep(lifecycle, id, deps, operation) {
     return evidence;
   } catch (error) {
     step.status = "failed";
+    if (error?.stepEvidence && typeof error.stepEvidence === "object") {
+      step.evidence = error.stepEvidence;
+      lifecycle.evidence.push({ stepId: id, target: step.target, ...step.evidence });
+    }
     step.error = { code: "STEP_FAILED", message: conciseError(error) };
     step.completedAt = lifecycleTimestamp(deps);
     lifecycle.errors.push({ stepId: id, target: step.target, ...step.error });
@@ -1133,9 +1137,6 @@ async function collectMobilerunTrajectory(directory) {
     fail("Mobilerun trajectory does not contain enough executed actions");
   }
   const secretIds = secretIdsIn(macro);
-  if (CAMBLE_MOBILERUN_SECRET_IDS.some((id) => !secretIds.has(id))) {
-    fail("Mobilerun trajectory does not prove use of the configured test account");
-  }
   const evidenceFiles = [];
   for (const [source, kind] of [[macroSource, "macro"], [trajectorySource, "trajectory"]]) {
     const details = await stat(source).catch(() => null);
@@ -1153,7 +1154,37 @@ async function collectMobilerunTrajectory(directory) {
     if (!details?.isFile() || details.size < 1 || details.size > 20 * 1024 * 1024) fail("Mobilerun trajectory screenshot is invalid");
     screenshotEvidence.push({ frame: fileName, bytes: details.size, sha256: await sha256File(source) });
   }
-  return { actionCount, secretIds: CAMBLE_MOBILERUN_SECRET_IDS, screenshotCount: screenshotFiles.length, screenshotEvidence, evidenceFiles };
+  return { actionCount, secretIds: [...secretIds].sort(), screenshotCount: screenshotFiles.length, screenshotEvidence, evidenceFiles };
+}
+
+function mobilerunTerminalVerdict(trajectory) {
+  if (!Array.isArray(trajectory)) return null;
+  const terminal = [...trajectory].reverse().find((event) => event && typeof event === "object"
+    && new Set(["ManagerPlanDetailsEvent", "ResultEvent"]).has(event.type));
+  if (!terminal || typeof terminal.success !== "boolean") return null;
+  const answer = typeof terminal.answer === "string"
+    ? terminal.answer.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 2_000)
+    : "";
+  return { type: terminal.type, success: terminal.success, answer };
+}
+
+async function collectMobilerunTerminalVerdict(directory) {
+  try {
+    const trajectory = JSON.parse(await readFile(path.join(directory, "trajectory.json"), "utf8"));
+    return mobilerunTerminalVerdict(trajectory);
+  } catch {
+    return null;
+  }
+}
+
+function failWithStepEvidence(message, evidence) {
+  const error = new PluginError(message);
+  error.stepEvidence = evidence;
+  throw error;
+}
+
+function isExistingAccountEnvironmentMismatch(answer) {
+  return /(?:not recognized|not recognised|unknown|does not exist|doesn't exist|not found)[^.!?]{0,120}(?:existing )?account|(?:create|creating|attempting to create)[^.!?]{0,80}(?:new )?password/i.test(answer);
 }
 
 function authenticatedMobilerunPrompt(input, packageName) {
@@ -1319,8 +1350,8 @@ async function cambleTest(request, deps) {
         ], { allowFailure: true, timeoutMs: 20 * 60_000, maxOutput: 2 * 1024 * 1024 });
         const directory = await newMobilerunTrajectory(secure.trajectoryRoot, before, deps);
         trajectoryEvidence = await collectMobilerunTrajectory(directory);
-        if (result.code !== 0) fail("Mobilerun authenticated test case did not complete successfully");
-        return {
+        const terminalVerdict = await collectMobilerunTerminalVerdict(directory);
+        const evidence = {
           deviceId: mobile.deviceId,
           packageName: built.packageName,
           mode: "reasoning",
@@ -1335,7 +1366,21 @@ async function cambleTest(request, deps) {
           },
           initialScreenshot,
           trajectory: trajectoryEvidence,
+          terminalVerdict,
         };
+        if (!terminalVerdict) failWithStepEvidence("Mobilerun did not produce a terminal verdict", evidence);
+        if (!terminalVerdict.success) {
+          const reason = terminalVerdict.answer || "The autonomous case failed without a terminal reason";
+          if (isExistingAccountEnvironmentMismatch(reason)) {
+            failWithStepEvidence(`Mobilerun existing-account environment mismatch: ${reason}`, evidence);
+          }
+          failWithStepEvidence(`Mobilerun terminal failure: ${reason}`, evidence);
+        }
+        if (result.code !== 0) failWithStepEvidence("Mobilerun thinking/vision process exited unsuccessfully despite a successful terminal verdict", evidence);
+        if (CAMBLE_MOBILERUN_SECRET_IDS.some((id) => !trajectoryEvidence.secretIds.includes(id))) {
+          failWithStepEvidence("Mobilerun trajectory does not prove use of the configured test account", evidence);
+        }
+        return evidence;
       });
       await runTestStep(lifecycle, "verify-mobile-case", deps, async () => {
         const ui = await mobilerunCommand(mobile, deps, ["device", "ui", "-d", mobile.deviceId], "APK UI verification");
