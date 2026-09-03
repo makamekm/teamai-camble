@@ -494,6 +494,9 @@ async function buildSignedAndroid(request, deps, options) {
   await deps.runner("npm", ["ci", "--no-audit", "--no-fund"], { cwd: applicationRoot, timeoutMs: 10 * 60 * 1000 });
   await deps.runner("npm", ["install", "--no-package-lock", "--no-audit", "--no-fund"], { cwd: path.join(applicationRoot, "builder"), timeoutMs: 5 * 60 * 1000 });
   await deps.runner("npm", ["run", "preinit"], { cwd: applicationRoot, env: { BACKEND_DIR: backendRoot, BACKEND_BRANCH: options.backendSha }, timeoutMs: 5 * 60 * 1000 });
+  const testHostOverlay = options.testEnvironment
+    ? await applyAndroidTestHostOverlay(applicationRoot, options.testEnvironment)
+    : null;
   const appJson = JSON.parse(await readFile(path.join(applicationRoot, "app.json"), "utf8"));
   const { versionName, buildNumber } = appVersion(appJson, "Generated Camble app.json");
   const packageName = appJson?.expo?.android?.package;
@@ -534,7 +537,7 @@ async function buildSignedAndroid(request, deps, options) {
   }
   const apkSha256 = await sha256File(apk);
   if (options.immutable) await chmod(apk, 0o400);
-  return { root, applicationRoot, artifactRoot, apk, aab, apkSha256, signing, versionName, buildNumber: String(buildNumber), packageName };
+  return { root, applicationRoot, artifactRoot, apk, aab, apkSha256, signing, versionName, buildNumber: String(buildNumber), packageName, testHostOverlay };
 }
 async function androidBuild(request, deps) {
   const input = inputs(request);
@@ -606,6 +609,30 @@ function conciseError(error) {
   return value.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 2_000) || "Unknown test failure";
 }
 function relativeArtifactPath(root, file) { return path.relative(root, file).split(path.sep).join("/"); }
+function nativeTestHost(environment) { return `https://${environment}`; }
+async function applyAndroidTestHostOverlay(applicationRoot, environment) {
+  const target = nativeTestHost(environment);
+  const source = path.join(applicationRoot, "src", "state", "firebase.native.ts");
+  const before = await readFile(source, "utf8");
+  let after = before;
+  const replacements = [
+    [/(["']host["']\s*:\s*)["']https:\/\/prod\.rulet\.tv["']/, `$1"${target}"`],
+    [/(["']stage_host["']\s*:\s*)["']https:\/\/stage\.rulet\.tv["']/, `$1"${target}"`],
+    [/(["']stage["']\s*:\s*)false/, "$1true"],
+  ];
+  for (const [pattern, replacement] of replacements) {
+    if (!pattern.test(after)) fail("Android test host overlay no longer matches firebase.native.ts");
+    after = after.replace(pattern, replacement);
+  }
+  await writeFile(source, after, { mode: 0o600 });
+  return {
+    environment,
+    target,
+    source: "src/state/firebase.native.ts",
+    beforeSha256: createHash("sha256").update(before, "utf8").digest("hex"),
+    afterSha256: createHash("sha256").update(after, "utf8").digest("hex"),
+  };
+}
 function testStepDefinitions(targets) {
   const definitions = [{ id: "resolve-sources", label: "Resolve immutable source SHAs", target: null }];
   if (targets.includes("Android")) definitions.push({ id: "build-android", label: "Build and verify immutable signed APK", target: "Android" });
@@ -961,8 +988,7 @@ function selectTrajectoryScreenshots(files, limit = 12) {
   return [...selected].sort((left, right) => left - right).map((index) => files[index]);
 }
 
-async function collectMobilerunTrajectory(request, deps, lifecycle, artifacts, directory) {
-  const root = workspace(request);
+async function collectMobilerunTrajectory(directory) {
   const macroSource = path.join(directory, "macro.json");
   const trajectorySource = path.join(directory, "trajectory.json");
   const macro = JSON.parse(await readFile(macroSource, "utf8"));
@@ -974,44 +1000,33 @@ async function collectMobilerunTrajectory(request, deps, lifecycle, artifacts, d
   if (CAMBLE_MOBILERUN_SECRET_IDS.some((id) => !secretIds.has(id))) {
     fail("Mobilerun trajectory does not prove use of the configured test account");
   }
-  const destinationRoot = path.join(root, "artifacts");
-  await mkdir(destinationRoot, { recursive: true, mode: 0o700 });
   const evidenceFiles = [];
-  for (const [source, name] of [[macroSource, `android-mobilerun-macro-${lifecycle.environment}.json`], [trajectorySource, `android-mobilerun-trajectory-${lifecycle.environment}.json`]]) {
+  for (const [source, kind] of [[macroSource, "macro"], [trajectorySource, "trajectory"]]) {
     const details = await stat(source).catch(() => null);
     if (!details?.isFile() || details.size < 1 || details.size > 20 * 1024 * 1024) fail("Mobilerun trajectory metadata is missing or oversized");
-    const destination = path.join(destinationRoot, name);
-    await copyFile(source, destination);
-    const relative = relativeArtifactPath(root, destination);
-    artifacts.push({ path: relative, type: "test-evidence" });
-    evidenceFiles.push({ path: relative, sha256: await sha256File(destination) });
+    evidenceFiles.push({ kind, bytes: details.size, sha256: await sha256File(source) });
   }
   const screenshotsRoot = path.join(directory, "screenshots");
   const screenshotFiles = (await readdir(screenshotsRoot, { withFileTypes: true }).catch(() => []))
     .filter((entry) => entry.isFile() && /^\d{4}\.png$/.test(entry.name)).map((entry) => entry.name).sort();
   if (screenshotFiles.length < 4) fail("Mobilerun trajectory has insufficient screenshot evidence");
-  const copiedScreenshots = [];
-  for (const [index, fileName] of selectTrajectoryScreenshots(screenshotFiles).entries()) {
+  const screenshotEvidence = [];
+  for (const fileName of selectTrajectoryScreenshots(screenshotFiles)) {
     const source = path.join(screenshotsRoot, fileName);
     const details = await stat(source).catch(() => null);
     if (!details?.isFile() || details.size < 1 || details.size > 20 * 1024 * 1024) fail("Mobilerun trajectory screenshot is invalid");
-    const destination = path.join(destinationRoot, `android-mobilerun-step-${String(index + 1).padStart(2, "0")}-${lifecycle.environment}.png`);
-    await copyFile(source, destination);
-    const relative = relativeArtifactPath(root, destination);
-    const sha256 = await sha256File(destination);
-    artifacts.push({ path: relative, type: "screenshot" });
-    lifecycle.screenshots.push({ target: "Android", kind: `mobilerun-step-${index + 1}`, path: relative, sha256 });
-    copiedScreenshots.push({ path: relative, sha256 });
+    screenshotEvidence.push({ frame: fileName, bytes: details.size, sha256: await sha256File(source) });
   }
-  return { actionCount, secretIds: CAMBLE_MOBILERUN_SECRET_IDS, screenshotCount: screenshotFiles.length, copiedScreenshots, evidenceFiles };
+  return { actionCount, secretIds: CAMBLE_MOBILERUN_SECRET_IDS, screenshotCount: screenshotFiles.length, screenshotEvidence, evidenceFiles };
 }
 
 function authenticatedMobilerunPrompt(input, packageName) {
   return [
     "Execute this Android UI test fail-closed. Use planning/reasoning and vision for every decision.",
-    `Launch ${packageName} and test only the ${input.environment} environment.`,
-    "First sign out any existing account. Confirm every cookie/privacy dialog and confirm the 18+ age gate.",
-    "Log in using the available secrets CAMBLE_TEST_EMAIL and CAMBLE_TEST_PASSWORD via type_secret; never expose their values.",
+    `Launch ${packageName}; the installed test build is already pinned to ${input.environment}.`,
+    "Confirm every cookie/privacy dialog and confirm the 18+ age gate.",
+    "Authenticate through the existing-account / Welcome back email flow using CAMBLE_TEST_EMAIL and CAMBLE_TEST_PASSWORD via type_secret; never expose their values.",
+    "Do not create or register an account, create/reset a password, or continue through an email-code flow. If the email is not recognized as an existing account, stop failed.",
     "Navigate to Feed/Лента. Find Eva, open her profile modal, and scroll the modal to the bottom until Chat/Чат, Gift/Подарок and Close/Закрыть are visible.",
     "Tap Chat and prove that the UI reacts, then return to Eva. Tap Gift and prove that the gift UI opens, then close it and return to Eva. Tap Close and prove the profile modal closes.",
     "Finally reopen Eva, scroll to the same bottom position, and leave the profile modal open with all three buttons visible for independent verification.",
@@ -1110,6 +1125,7 @@ async function cambleTest(request, deps) {
           requirePackage: true,
           verifySignature: true,
           immutable: true,
+          testEnvironment: input.environment,
         });
         built = result;
         const relative = relativeArtifactPath(result.root, result.apk);
@@ -1123,6 +1139,7 @@ async function cambleTest(request, deps) {
           packageName: result.packageName,
           applicationSha,
           backendSha,
+          testHostOverlay: result.testHostOverlay,
         };
         return lifecycle.provenance.androidArtifact;
       });
@@ -1137,17 +1154,31 @@ async function cambleTest(request, deps) {
         adb = await resolveAdb(request, deps);
         const installed = await deps.runner(adb, ["-s", mobile.deviceId, "install", "-r", built.apk], { allowFailure: true, timeoutMs: 3 * 60_000, maxOutput: 512 * 1024 });
         if (installed.code !== 0) fail("ADB failed to install the exact Chat Test APK");
+        const cleared = await deps.runner(adb, ["-s", mobile.deviceId, "shell", "pm", "clear", built.packageName], { allowFailure: true, timeoutMs: 30_000, maxOutput: 64 * 1024 });
+        if (cleared.code !== 0 || !/\bSuccess\b/.test(cleared.stdout)) fail("ADB failed to clear stale app state before Chat Test");
         const details = await deps.runner(adb, ["-s", mobile.deviceId, "shell", "dumpsys", "package", built.packageName], { allowFailure: true, timeoutMs: 30_000, maxOutput: 2 * 1024 * 1024 });
         if (details.code !== 0 || !new RegExp(`versionName=${built.versionName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`).test(details.stdout)
           || !new RegExp(`versionCode=${built.buildNumber}(?:\\s|$)`).test(details.stdout)) {
           fail(`Installed APK package ${built.packageName} did not match the built version`);
         }
-        return { deviceId: mobile.deviceId, packageName: built.packageName, versionName: built.versionName, buildNumber: built.buildNumber, artifactSha256: built.apkSha256, installed: true, installer: path.basename(adb) };
+        return { deviceId: mobile.deviceId, packageName: built.packageName, versionName: built.versionName, buildNumber: built.buildNumber, artifactSha256: built.apkSha256, installed: true, staleStateCleared: true, installer: path.basename(adb) };
       });
       await runTestStep(lifecycle, "mobilerun-thinking", deps, async () => {
         const secure = await secureMobilerunCaseConfig(deps);
         const before = await trajectoryDirectories(secure.trajectoryRoot);
+        await deps.runner(adb, ["-s", mobile.deviceId, "logcat", "-c"], { allowFailure: true, timeoutMs: 30_000, maxOutput: 64 * 1024 });
         await mobilerunCommand(mobile, deps, ["device", "start", "-d", mobile.deviceId, built.packageName], "APK launch");
+        const expectedHost = nativeTestHost(input.environment);
+        let runtimeHostObserved = false;
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          const logs = await deps.runner(adb, ["-s", mobile.deviceId, "logcat", "-d", "ReactNativeJS:I", "*:S"], { allowFailure: true, timeoutMs: 30_000, maxOutput: 512 * 1024 });
+          if (logs.code === 0 && logs.stdout.includes(expectedHost)) {
+            runtimeHostObserved = true;
+            break;
+          }
+          await deps.sleep(500);
+        }
+        if (!runtimeHostObserved) fail(`Running APK did not prove the selected ${input.environment} backend`);
         const initialScreenshot = await captureMobileScreenshot(request, deps, lifecycle, artifacts, mobile, "before-thinking");
         const prompt = authenticatedMobilerunPrompt(input, built.packageName);
         const result = await deps.runner(mobile.executable, [
@@ -1156,7 +1187,7 @@ async function cambleTest(request, deps) {
           "--save-trajectory", "action", prompt,
         ], { allowFailure: true, timeoutMs: 20 * 60_000, maxOutput: 2 * 1024 * 1024 });
         const directory = await newMobilerunTrajectory(secure.trajectoryRoot, before, deps);
-        trajectoryEvidence = await collectMobilerunTrajectory(request, deps, lifecycle, artifacts, directory);
+        trajectoryEvidence = await collectMobilerunTrajectory(directory);
         if (result.code !== 0) fail("Mobilerun authenticated test case did not complete successfully");
         return {
           deviceId: mobile.deviceId,
@@ -1165,6 +1196,8 @@ async function cambleTest(request, deps) {
           vision: true,
           maxSteps: 80,
           authenticatedWithCredentialIds: CAMBLE_MOBILERUN_SECRET_IDS,
+          selectedEnvironment: input.environment,
+          runtimeHost: expectedHost,
           initialScreenshot,
           trajectory: trajectoryEvidence,
         };
@@ -1195,7 +1228,7 @@ async function cambleTest(request, deps) {
     return ok("Camble authenticated Mobilerun test case passed", lifecycle, artifacts);
   } catch (error) {
     finalizeTestLifecycle(lifecycle, false, deps);
-    throw new PluginError(`Camble chat test failed: ${conciseError(error)}`, lifecycle, artifacts);
+    throw new PluginError(`Camble chat test failed: ${conciseError(error)}`, lifecycle, []);
   }
 }
 
