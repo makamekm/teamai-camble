@@ -1313,24 +1313,6 @@ async function collectMobilerunTrajectory(directory) {
   }
   const evidence = { actionCount, secretIds: [...secretIds].sort(), screenshotCount: screenshotFiles.length, screenshotEvidence, evidenceFiles };
   Object.defineProperty(evidence, "macro", { value: macro, enumerable: false });
-  Object.defineProperty(evidence, "screenshotsRoot", { value: screenshotsRoot, enumerable: false });
-  return evidence;
-}
-
-async function persistTrajectoryScreenshot(request, lifecycle, artifacts, trajectoryEvidence, selected) {
-  if (!selected || !/^\d{4}\.png$/.test(selected.frame) || typeof trajectoryEvidence.screenshotsRoot !== "string") fail("Mobilerun target screenshot reference is invalid");
-  const source = path.join(trajectoryEvidence.screenshotsRoot, selected.frame);
-  const bytes = await readFile(source);
-  if (bytes.length !== selected.bytes || createHash("sha256").update(bytes).digest("hex") !== selected.sha256) fail("Mobilerun target screenshot changed after trajectory collection");
-  const root = workspace(request);
-  const screenshot = path.join(root, "artifacts", `android-target-${selected.frame}`);
-  await mkdir(path.dirname(screenshot), { recursive: true, mode: 0o700 });
-  await writeFile(screenshot, bytes, { mode: 0o600 });
-  const dimensions = await assertPng(screenshot);
-  const relative = relativeArtifactPath(root, screenshot);
-  artifacts.push({ path: relative, type: "screenshot" });
-  const evidence = { target: "Android", kind: "target-screen", frame: selected.frame, path: relative, sha256: selected.sha256, ...dimensions };
-  lifecycle.screenshots.push(evidence);
   return evidence;
 }
 
@@ -1530,6 +1512,8 @@ async function cambleTest(request, deps) {
   let mobile = null;
   let adb = null;
   let trajectoryEvidence = null;
+  let finalMobileScreenshot = null;
+  let finalMobileUi = null;
   try {
     await runTestStep(lifecycle, "resolve-sources", deps, async () => {
       const [applicationSha, backendSha] = await Promise.all([
@@ -1667,6 +1651,10 @@ async function cambleTest(request, deps) {
         if (CAMBLE_MOBILERUN_SECRET_IDS.some((id) => !trajectoryEvidence.secretIds.includes(id))) {
           failWithStepEvidence("Mobilerun trajectory does not prove use of the configured test account", evidence);
         }
+        const finalUiResult = await mobilerunCommand(mobile, deps, ["device", "ui", "-d", mobile.deviceId], "final target UI");
+        finalMobileUi = assertFinalMobileCaseUi(finalUiResult.stdout);
+        finalMobileScreenshot = await captureMobileScreenshot(request, deps, lifecycle, artifacts, mobile, "after-thinking");
+        evidence.finalLiveUi = { assertions: finalMobileUi.assertions, controls: finalMobileUi.controls, uiSha256: uiEvidenceHash(finalUiResult.stdout), screenshot: finalMobileScreenshot };
         evidence.authenticatedWithCredentialIds = CAMBLE_MOBILERUN_SECRET_IDS;
         return evidence;
         } finally {
@@ -1678,15 +1666,17 @@ async function cambleTest(request, deps) {
         const targetScreenshot = trajectoryEvidence.screenshotEvidence.find((item) => item.frame === `${String(target.interactions[0].actionIndex).padStart(4, "0")}.png`)
           ?? trajectoryEvidence.screenshotEvidence.at(-1);
         if (!targetScreenshot) fail("Mobilerun trajectory does not contain a target-screen screenshot");
-        const durableTargetScreenshot = await persistTrajectoryScreenshot(request, lifecycle, artifacts, trajectoryEvidence, targetScreenshot);
+        if (!finalMobileScreenshot || !finalMobileUi) fail("Mobilerun final target screenshot was not captured");
         return {
           deviceId: mobile.deviceId,
           packageName: built.packageName,
           authenticated: true,
           gatesConfirmedByReachability: ["cookie-or-privacy", "age-18-plus"],
-          finalUiAssertions: target.assertions,
+          finalUiAssertions: finalMobileUi.assertions,
+          finalUiControls: finalMobileUi.controls,
           trajectoryActionCount: trajectoryEvidence.actionCount,
-          targetScreenshot: durableTargetScreenshot,
+          targetScreenshot: finalMobileScreenshot,
+          trajectoryInteractionScreenshot: targetScreenshot,
           interactionAssertions: target.interactions,
         };
       });
