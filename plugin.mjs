@@ -14,9 +14,11 @@ const BRANCH = /^(?:dev|(?:test|testing|qa|feature|fix|bugfix)\/[A-Za-z0-9][A-Za
 const DEVICE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const ANDROID_PACKAGE = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
 const PLAY_TRACK = "internal";
-const TEST_ENVIRONMENTS = new Set(["test.rulet.tv", "peprod.rulet.tv"]);
-const TEST_TARGETS = ["Android"];
-const TEST_INPUTS = new Set(["environment", "targets", "device-id", "comment", "application-branch", "backend-branch"]);
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const TEST_ENVIRONMENTS = new Set(["test.rulet.tv", "preprod.rulet.tv", "stage.rulet.tv", "rulet.tv"]);
+const MANAGED_TEST_ENVIRONMENTS = new Set(["test.rulet.tv", "preprod.rulet.tv"]);
+const TEST_TARGETS = ["Desktop", "Chrome", "Android"];
+const TEST_INPUTS = new Set(["environment", "targets", "device-id", "comment", "application-branch", "backend-branch", "test-account"]);
 const INHERITED_ENV = [
   "PATH", "PATHEXT", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
   "SystemRoot", "WINDIR", "COMSPEC", "ComSpec", "TEMP", "TMP", "TMPDIR", "KUBECONFIG",
@@ -447,6 +449,15 @@ function secret(request, deps, name, required = true) {
 }
 function gradleProperty(value) { return value.replaceAll("\\", "\\\\").replaceAll("\r", "\\r").replaceAll("\n", "\\n").replaceAll("=", "\\=").replaceAll(":", "\\:"); }
 async function assertFile(file) { const value = await stat(file).catch(() => null); if (!value?.isFile() || value.size < 1) fail(`Missing build output ${path.basename(file)}`); }
+async function assertPng(file) {
+  const bytes = await readFile(file);
+  const magic = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (bytes.length < 24 || !bytes.subarray(0, 8).equals(magic) || bytes.subarray(12, 16).toString("ascii") !== "IHDR") fail("Screenshot is not a valid PNG");
+  const width = bytes.readUInt32BE(16);
+  const height = bytes.readUInt32BE(20);
+  if (width < 1 || height < 1 || width > 10_000 || height > 10_000) fail("Screenshot PNG dimensions are invalid");
+  return { width, height, bytes: bytes.length };
+}
 async function sha256File(file) {
   const hash = createHash("sha256");
   await new Promise((resolve, reject) => {
@@ -592,6 +603,21 @@ function testBranch(value, label) {
     || value.split("/").some((part) => part === "" || part === "." || part === ".." || part.startsWith("."))) fail(`Invalid ${label}`);
   return value;
 }
+function testAccountCredential(value, environment) {
+  if (value === undefined) return null;
+  if (typeof value !== "string" || value.length < 2 || value.length > 10_000) fail("Invalid test account credential");
+  let credential;
+  try { credential = JSON.parse(value); } catch { fail("Invalid test account credential"); }
+  if (!credential || typeof credential !== "object" || Array.isArray(credential)
+    || Object.keys(credential).some((key) => !["id", "projectId", "environment", "login", "password", "selection"].includes(key))
+    || !UUID.test(credential.id) || !UUID.test(credential.projectId) || credential.environment !== environment
+    || typeof credential.login !== "string" || credential.login.length < 1 || credential.login.length > 320 || /[\u0000-\u001f\u007f]/.test(credential.login)
+    || typeof credential.password !== "string" || credential.password.length < 1 || credential.password.length > 4_096 || /[\u0000\r\n]/.test(credential.password)
+    || (credential.selection !== undefined && !["selected", "automatic"].includes(credential.selection))) {
+    fail("Invalid test account credential");
+  }
+  return { ...credential, selection: credential.selection ?? "selected" };
+}
 function testActionInputs(request) {
   const raw = request.input ?? request.inputs ?? {};
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) fail("Invalid input object");
@@ -607,7 +633,8 @@ function testActionInputs(request) {
   const applicationBranch = testBranch(raw["application-branch"] ?? repository(request, "application3").defaultBranch ?? "dev", "application branch");
   const backendBranch = testBranch(raw["backend-branch"] ?? repository(request, "backend").defaultBranch ?? "dev", "backend branch");
   const comment = optionalText(raw.comment, "test case", 20_000);
-  if (!comment?.trim()) fail("Authenticated Android Chat Test requires a non-empty test case");
+  if (!comment?.trim()) fail("Chat Test requires a non-empty test case");
+  const account = testAccountCredential(raw["test-account"], raw.environment);
   return {
     environment: raw.environment,
     targets,
@@ -615,6 +642,8 @@ function testActionInputs(request) {
     comment: comment.trim(),
     applicationBranch,
     backendBranch,
+    account,
+    accountMode: account?.selection === "selected" ? "selected" : MANAGED_TEST_ENVIRONMENTS.has(raw.environment) ? "managed-auto" : "external-auto",
   };
 }
 function lifecycleTimestamp(deps) { return new Date(deps.now()).toISOString(); }
@@ -761,6 +790,8 @@ async function proveAndroidRuntimeHost(request, deps, adb, mobile, packageName, 
 }
 function testStepDefinitions(targets) {
   const definitions = [{ id: "resolve-sources", label: "Resolve immutable source SHAs", target: null }];
+  if (targets.includes("Desktop")) definitions.push({ id: "desktop-chrome", label: "Open Desktop Chrome and capture screenshot evidence", target: "Desktop" });
+  if (targets.includes("Chrome")) definitions.push({ id: "mobile-chrome", label: "Open Mobile Chrome viewport and capture screenshot evidence", target: "Chrome" });
   if (targets.includes("Android")) definitions.push({ id: "build-android", label: "Build and verify immutable signed APK", target: "Android" });
   if (targets.includes("Android")) definitions.push(
     { id: "resolve-device", label: "Resolve and ping Mobilerun device", target: "Android" },
@@ -877,12 +908,13 @@ async function httpEvidence(deps, deepLink, environment) {
 function titleFromDom(dom) {
   return /<title[^>]*>([^<]{0,500})<\/title>/i.exec(dom)?.[1]?.trim() ?? null;
 }
-function chromeArguments(profile, viewport) {
-  return ["--headless=new", "--disable-gpu", "--disable-extensions", "--disable-component-update", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-sync", "--metrics-recording-only", `--window-size=${viewport}`, `--user-data-dir=${profile}`];
+function chromeArguments(profile, viewport, mobile = false) {
+  return ["--headless=new", "--disable-gpu", "--disable-extensions", "--disable-component-update", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-sync", "--metrics-recording-only", `--window-size=${viewport}`, `--user-data-dir=${profile}`,
+    ...(mobile ? ["--touch-events=enabled", "--user-agent=Mozilla/5.0 (Linux; Android 15; Mobile) AppleWebKit/537.36 Chrome/140 Safari/537.36"] : [])];
 }
 
-async function captureChromeWithRunner({ chrome, profile, screenshot, deepLink, viewport, deps }) {
-  const common = chromeArguments(profile, viewport).filter((argument) => !argument.startsWith("--user-data-dir="));
+async function captureChromeWithRunner({ chrome, profile, screenshot, deepLink, viewport, mobile, deps }) {
+  const common = chromeArguments(profile, viewport, mobile).filter((argument) => !argument.startsWith("--user-data-dir="));
   const domResult = await deps.runner(chrome.executable, [...common, `--user-data-dir=${path.join(profile, "dom")}`, "--virtual-time-budget=10000", "--dump-dom", deepLink], { allowFailure: true, timeoutMs: 30_000, maxOutput: 4 * 1024 * 1024 });
   const dom = domResult.stdout;
   await deps.runner(chrome.executable, [...common, `--user-data-dir=${path.join(profile, "screenshot")}`, "--virtual-time-budget=10000", `--screenshot=${screenshot}`, deepLink], { timeoutMs: 30_000, maxOutput: 256 * 1024 });
@@ -935,9 +967,9 @@ async function chromeDevToolsSession(webSocketUrl, timeoutMs) {
   };
 }
 
-async function captureChromeCdp({ chrome, profile, screenshot, deepLink, viewport, deps }) {
+async function captureChromeCdp({ chrome, profile, screenshot, deepLink, viewport, mobile, deps }) {
   const [width, height] = viewport.split(",").map(Number);
-  const args = [...chromeArguments(profile, viewport), "--remote-debugging-port=0", "about:blank"];
+  const args = [...chromeArguments(profile, viewport, mobile), "--remote-debugging-port=0", "about:blank"];
   const child = spawn(chrome.executable, args, { env: subprocessEnvironment(deps.environment), stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
   let stderr = "";
   child.stderr.on("data", (chunk) => { if (stderr.length < 64 * 1024) stderr += chunk.toString("utf8"); });
@@ -952,7 +984,11 @@ async function captureChromeCdp({ chrome, profile, screenshot, deepLink, viewpor
     session = await chromeDevToolsSession(page.webSocketDebuggerUrl, 15_000);
     await session.call("Page.enable");
     await session.call("Runtime.enable");
-    await session.call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+    await session.call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: mobile ? 3 : 1, mobile: Boolean(mobile) });
+    if (mobile) {
+      await session.call("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
+      await session.call("Network.setUserAgentOverride", { userAgent: "Mozilla/5.0 (Linux; Android 15; Mobile) AppleWebKit/537.36 Chrome/140 Safari/537.36", platform: "Android" });
+    }
     await session.call("Page.navigate", { url: deepLink });
     const deadline = Date.now() + 45_000;
     let document = null;
@@ -994,8 +1030,9 @@ async function captureBrowserTarget(request, deps, lifecycle, artifacts, chrome,
   const profile = path.join(root, "browser-profiles", targetSlug);
   const screenshot = path.join(root, "artifacts", `${targetSlug}-${lifecycle.environment}.png`);
   await Promise.all([mkdir(profile, { recursive: true, mode: 0o700 }), mkdir(path.dirname(screenshot), { recursive: true, mode: 0o700 })]);
-  const viewport = target === "Desktop" ? "1440,1000" : "1280,800";
-  const captured = await deps.browserCapture({ chrome, profile, screenshot, deepLink, viewport, deps });
+  const mobile = target === "Chrome";
+  const viewport = mobile ? "390,844" : "1440,1000";
+  const captured = await deps.browserCapture({ chrome, profile, screenshot, deepLink, viewport, mobile, deps });
   const dom = captured.dom;
   if (!/<html\b/i.test(dom) || !/<body\b/i.test(dom) || /(?:chrome-error:\/\/|ERR_[A-Z_]+|This site can['’]t be reached)/i.test(dom)) fail(`${target} DOM check failed`);
   const finalUrl = new URL(captured.finalUrl ?? deepLink);
@@ -1006,11 +1043,12 @@ async function captureBrowserTarget(request, deps, lifecycle, artifacts, chrome,
     deps.httpEvidenceCache.set(deepLink, http);
   }
   await assertFile(screenshot);
+  const dimensions = await assertPng(screenshot);
   const screenshotSha256 = await sha256File(screenshot);
   const relative = relativeArtifactPath(root, screenshot);
   artifacts.push({ path: relative, type: "screenshot" });
-  lifecycle.screenshots.push({ target, kind: "browser", path: relative, sha256: screenshotSha256 });
-  return { http, dom: { htmlDocument: true, bytes: Buffer.byteLength(dom, "utf8"), title: titleFromDom(dom), finalUrl: finalUrl.href }, screenshot: { path: relative, sha256: screenshotSha256 } };
+  lifecycle.screenshots.push({ target, kind: "browser", path: relative, sha256: screenshotSha256, ...dimensions });
+  return { http, dom: { htmlDocument: true, bytes: Buffer.byteLength(dom, "utf8"), title: titleFromDom(dom), finalUrl: finalUrl.href }, screenshot: { path: relative, sha256: screenshotSha256, ...dimensions } };
 }
 function parseMobilerunDevices(output) {
   const stripped = String(output ?? "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
@@ -1074,8 +1112,16 @@ async function captureMobileScreenshot(request, deps, lifecycle, artifacts, mobi
   const source = path.isAbsolute(returned) ? returned : path.resolve(workspace(request), returned);
   const sourceStat = await stat(source).catch(() => null);
   if (!sourceStat?.isFile() || sourceStat.size < 1 || sourceStat.size > 20 * 1024 * 1024 || path.extname(source).toLowerCase() !== ".png") fail("Mobilerun returned an invalid screenshot");
-  const sha256 = await sha256File(source);
-  const evidence = { target: "Android", kind, bytes: sourceStat.size, sha256 };
+  const root = workspace(request);
+  const screenshot = path.join(root, "artifacts", `android-${kind}-${String(lifecycle.screenshots.length + 1).padStart(2, "0")}.png`);
+  await mkdir(path.dirname(screenshot), { recursive: true, mode: 0o700 });
+  await copyFile(source, screenshot);
+  await chmod(screenshot, 0o600);
+  const dimensions = await assertPng(screenshot);
+  const sha256 = await sha256File(screenshot);
+  const relative = relativeArtifactPath(root, screenshot);
+  artifacts.push({ path: relative, type: "screenshot" });
+  const evidence = { target: "Android", kind, path: relative, sha256, ...dimensions };
   lifecycle.screenshots.push(evidence);
   return evidence;
 }
@@ -1129,28 +1175,61 @@ function redactMobilerunTerminalText(value, secretValues) {
   return redacted.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 2_000);
 }
 
-async function secureMobilerunCaseConfig(deps) {
+async function secureMobilerunCaseConfig(request, deps, selectedAccount) {
   const home = deps.environment.HOME ?? deps.environment.USERPROFILE;
   if (typeof home !== "string" || !path.isAbsolute(home)) fail("Mobilerun test home is unavailable");
-  const config = path.join(home, ".teamai", "camble-mobilerun-config.yaml");
-  const credentials = path.join(home, ".teamai", "camble-mobilerun-credentials.yaml");
+  const baseConfig = path.join(home, ".teamai", "camble-mobilerun-config.yaml");
+  const baseCredentials = path.join(home, ".teamai", "camble-mobilerun-credentials.yaml");
   const trajectoryRoot = path.join(home, ".teamai", "camble-mobilerun-trajectories");
-  const [configStat, credentialStat, trajectoryStat] = await Promise.all([
-    stat(config).catch(() => null),
-    stat(credentials).catch(() => null),
+  const [configStat, trajectoryStat] = await Promise.all([
+    stat(baseConfig).catch(() => null),
     stat(trajectoryRoot).catch(() => null),
   ]);
   if (!configStat?.isFile() || configStat.size < 1 || configStat.size > 1024 * 1024 || (configStat.mode & 0o077) !== 0) {
     fail("Secure Mobilerun test config is missing or has unsafe permissions");
   }
+  if (!trajectoryStat?.isDirectory()) fail("Mobilerun trajectory directory is unavailable");
+  if (selectedAccount) {
+    const root = workspace(request);
+    const credentials = path.join(root, ".teamai-test-account.yaml");
+    const config = path.join(root, ".teamai-mobilerun-config.yaml");
+    const credentialsYaml = [
+      "secrets:",
+      "  CAMBLE_TEST_EMAIL:",
+      `    value: ${JSON.stringify(selectedAccount.login)}`,
+      "    enabled: true",
+      "  CAMBLE_TEST_PASSWORD:",
+      `    value: ${JSON.stringify(selectedAccount.password)}`,
+      "    enabled: true",
+      "",
+    ].join("\n");
+    const sourceConfig = await readFile(baseConfig, "utf8");
+    if (!/^\s*file_path:\s*.+$/m.test(sourceConfig)) fail("Mobilerun config does not declare credentials.file_path");
+    const runtimeConfig = sourceConfig.replace(/^([ \t]*file_path:\s*).+$/m, `$1${JSON.stringify(credentials)}`);
+    try {
+      await writeFile(credentials, credentialsYaml, { mode: 0o600 });
+      await writeFile(config, runtimeConfig, { mode: 0o600 });
+    } catch (error) {
+      await Promise.all([unlink(credentials).catch(() => {}), unlink(config).catch(() => {})]);
+      throw error;
+    }
+    const secretValues = [selectedAccount.login, selectedAccount.password];
+    return {
+      config,
+      trajectoryRoot,
+      source: "matrix",
+      redactText: (value) => redactMobilerunTerminalText(value, secretValues),
+      cleanup: async () => { await Promise.all([unlink(credentials).catch(() => {}), unlink(config).catch(() => {})]); },
+    };
+  }
+  const credentialStat = await stat(baseCredentials).catch(() => null);
   if (!credentialStat?.isFile() || credentialStat.size < 1 || credentialStat.size > 1024 * 1024 || (credentialStat.mode & 0o077) !== 0) {
     fail("Secure Mobilerun credential file is missing or has unsafe permissions");
   }
-  if (!trajectoryStat?.isDirectory()) fail("Mobilerun trajectory directory is unavailable");
-  const credentialsById = mobilerunCredentialValues(await readFile(credentials, "utf8"));
+  const credentialsById = mobilerunCredentialValues(await readFile(baseCredentials, "utf8"));
   if (CAMBLE_MOBILERUN_SECRET_IDS.some((id) => !credentialsById.has(id))) fail("Secure Mobilerun test credentials are incomplete");
   const secretValues = [...credentialsById.values()];
-  return { config, trajectoryRoot, redactText: (value) => redactMobilerunTerminalText(value, secretValues) };
+  return { config: baseConfig, trajectoryRoot, source: "plugin-auto", redactText: (value) => redactMobilerunTerminalText(value, secretValues), cleanup: async () => {} };
 }
 
 async function trajectoryDirectories(root) {
@@ -1224,6 +1303,24 @@ async function collectMobilerunTrajectory(directory) {
   }
   const evidence = { actionCount, secretIds: [...secretIds].sort(), screenshotCount: screenshotFiles.length, screenshotEvidence, evidenceFiles };
   Object.defineProperty(evidence, "macro", { value: macro, enumerable: false });
+  Object.defineProperty(evidence, "screenshotsRoot", { value: screenshotsRoot, enumerable: false });
+  return evidence;
+}
+
+async function persistTrajectoryScreenshot(request, lifecycle, artifacts, trajectoryEvidence, selected) {
+  if (!selected || !/^\d{4}\.png$/.test(selected.frame) || typeof trajectoryEvidence.screenshotsRoot !== "string") fail("Mobilerun target screenshot reference is invalid");
+  const source = path.join(trajectoryEvidence.screenshotsRoot, selected.frame);
+  const bytes = await readFile(source);
+  if (bytes.length !== selected.bytes || createHash("sha256").update(bytes).digest("hex") !== selected.sha256) fail("Mobilerun target screenshot changed after trajectory collection");
+  const root = workspace(request);
+  const screenshot = path.join(root, "artifacts", `android-target-${selected.frame}`);
+  await mkdir(path.dirname(screenshot), { recursive: true, mode: 0o700 });
+  await writeFile(screenshot, bytes, { mode: 0o600 });
+  const dimensions = await assertPng(screenshot);
+  const relative = relativeArtifactPath(root, screenshot);
+  artifacts.push({ path: relative, type: "screenshot" });
+  const evidence = { target: "Android", kind: "target-screen", frame: selected.frame, path: relative, sha256: selected.sha256, ...dimensions };
+  lifecycle.screenshots.push(evidence);
   return evidence;
 }
 
@@ -1257,12 +1354,16 @@ function isExistingAccountEnvironmentMismatch(answer) {
 }
 
 function authenticatedMobilerunPrompt(input, packageName) {
+  const accountInstruction = input.accountMode === "selected"
+    ? "Authenticate through the existing-account / Welcome back email flow using CAMBLE_TEST_EMAIL and CAMBLE_TEST_PASSWORD via type_secret; never expose their values. Do not create or register another account. If the selected account is not recognized, stop failed."
+    : input.accountMode === "managed-auto"
+      ? "Use CAMBLE_TEST_EMAIL and CAMBLE_TEST_PASSWORD via type_secret; never expose their values. Try the existing-account flow first. If this managed test environment does not recognize the account, create it with the same credentials, complete required verification/profile gates, or reset the disposable test account verification state when the UI offers that flow."
+      : "Authenticate using CAMBLE_TEST_EMAIL and CAMBLE_TEST_PASSWORD via type_secret; never expose their values. This is an external environment: do not create, reset, or mutate an account; fail if the configured account is not recognized.";
   return [
     "Execute this Android UI test fail-closed. Use planning/reasoning and vision for every decision.",
     `Launch ${packageName}; the installed test build is already pinned to ${input.environment}.`,
     "Confirm every cookie/privacy dialog and confirm the 18+ age gate.",
-    "Authenticate through the existing-account / Welcome back email flow using CAMBLE_TEST_EMAIL and CAMBLE_TEST_PASSWORD via type_secret; never expose their values.",
-    "Do not create or register an account, create/reset a password, or continue through an email-code flow. If the email is not recognized as an existing account, stop failed.",
+    accountInstruction,
     "Navigate to Feed/Лента. Find Eva, open her profile modal, and scroll the modal to the bottom until Chat/Чат, Gift/Подарок and Close/Закрыть are visible.",
     "Tap Chat and prove that the UI reacts, then return to Eva. Tap Gift and prove that the gift UI opens, then close it and return to Eva. Tap Close and prove the profile modal closes.",
     "Finally reopen Eva, scroll to the same bottom position, and leave the profile modal open with all three buttons visible for independent verification.",
@@ -1400,6 +1501,7 @@ async function cambleTest(request, deps) {
     comment: input.comment,
     requestedDeviceId: input.deviceId,
     sourceBranches: { application: input.applicationBranch, backend: input.backendBranch },
+    account: { mode: input.accountMode, id: input.account?.id ?? null },
     status: "running",
     startedAt: lifecycleTimestamp(deps),
     completedAt: null,
@@ -1414,6 +1516,7 @@ async function cambleTest(request, deps) {
   };
   const artifacts = [];
   let built = null;
+  let chrome = null;
   let mobile = null;
   let adb = null;
   let trajectoryEvidence = null;
@@ -1427,6 +1530,14 @@ async function cambleTest(request, deps) {
       lifecycle.provenance.backend = { repository: "backend", branch: input.backendBranch, sha: backendSha };
       return { applicationSha, backendSha };
     });
+    for (const [target, stepId] of [["Desktop", "desktop-chrome"], ["Chrome", "mobile-chrome"]]) {
+      if (!input.targets.includes(target)) continue;
+      await runTestStep(lifecycle, stepId, deps, async () => {
+        chrome ??= await resolveChrome(request, deps);
+        const evidence = await captureBrowserTarget(request, deps, lifecycle, artifacts, chrome, target, deepLink);
+        return { target: target === "Chrome" ? "Mobile Chrome" : "Desktop Chrome", chromeVersion: chrome.version, ...evidence };
+      });
+    }
     if (input.targets.includes("Android")) {
       await runTestStep(lifecycle, "build-android", deps, async () => {
         const applicationSha = lifecycle.provenance.application.sha;
@@ -1482,7 +1593,8 @@ async function cambleTest(request, deps) {
         return { deviceId: mobile.deviceId, packageName: built.packageName, versionName: built.versionName, buildNumber: built.buildNumber, artifactSha256: built.apkSha256, installed: true, staleStateCleared: true, installer: path.basename(adb), installedArtifact };
       });
       await runTestStep(lifecycle, "mobilerun-thinking", deps, async () => {
-        const secure = await secureMobilerunCaseConfig(deps);
+        const secure = await secureMobilerunCaseConfig(request, deps, input.account);
+        try {
         const clearedLogs = await deps.runner(adb, ["-s", mobile.deviceId, "logcat", "-c"], { allowFailure: true, timeoutMs: 30_000, maxOutput: 64 * 1024 });
         if (clearedLogs.code !== 0) fail("ADB failed to clear stale runtime logs before Chat Test");
         await mobilerunCommand(mobile, deps, ["device", "start", "-d", mobile.deviceId, built.packageName], "APK launch");
@@ -1501,7 +1613,7 @@ async function cambleTest(request, deps) {
             "run", "-c", secure.config, "-d", mobile.deviceId,
             "--steps", "80", "--reasoning", "--vision", "--no-stream",
             "--save-trajectory", "action", prompt,
-          ], { allowFailure: true, timeoutMs: 20 * 60_000, maxOutput: 2 * 1024 * 1024 });
+          ], { allowFailure: true, timeoutMs: 20 * 60_000, maxOutput: 2 * 1024 * 1024, env: { TEAMAI_MOBILERUN_ALLOWED_HTTPS_HOSTS: input.environment } });
           try {
             directory = await newMobilerunTrajectory(secure.trajectoryRoot, beforeAttempt, deps);
           } catch (error) {
@@ -1522,6 +1634,7 @@ async function cambleTest(request, deps) {
           maxSteps: 80,
           mobilerunAttempts,
           attemptedCredentialIds: trajectoryEvidence.secretIds,
+          credentialSource: secure.source,
           selectedEnvironment: input.environment,
           runtimeHost: expectedHost,
           runtimeHostProof: {
@@ -1546,12 +1659,16 @@ async function cambleTest(request, deps) {
         }
         evidence.authenticatedWithCredentialIds = CAMBLE_MOBILERUN_SECRET_IDS;
         return evidence;
+        } finally {
+          await secure.cleanup();
+        }
       });
       await runTestStep(lifecycle, "verify-mobile-case", deps, async () => {
         const target = trajectoryInteractionEvidence(trajectoryEvidence.macro);
         const targetScreenshot = trajectoryEvidence.screenshotEvidence.find((item) => item.frame === `${String(target.interactions[0].actionIndex).padStart(4, "0")}.png`)
           ?? trajectoryEvidence.screenshotEvidence.at(-1);
         if (!targetScreenshot) fail("Mobilerun trajectory does not contain a target-screen screenshot");
+        const durableTargetScreenshot = await persistTrajectoryScreenshot(request, lifecycle, artifacts, trajectoryEvidence, targetScreenshot);
         return {
           deviceId: mobile.deviceId,
           packageName: built.packageName,
@@ -1559,16 +1676,16 @@ async function cambleTest(request, deps) {
           gatesConfirmedByReachability: ["cookie-or-privacy", "age-18-plus"],
           finalUiAssertions: target.assertions,
           trajectoryActionCount: trajectoryEvidence.actionCount,
-          targetScreenshot,
+          targetScreenshot: durableTargetScreenshot,
           interactionAssertions: target.interactions,
         };
       });
     }
     finalizeTestLifecycle(lifecycle, true, deps);
-    return ok("Camble authenticated Mobilerun test case passed", lifecycle, artifacts);
+    return ok("Camble Chat Test passed with durable screenshot evidence", lifecycle, artifacts);
   } catch (error) {
     finalizeTestLifecycle(lifecycle, false, deps);
-    throw new PluginError(`Camble chat test failed: ${conciseError(error)}`, lifecycle, []);
+    throw new PluginError(`Camble chat test failed: ${conciseError(error)}`, lifecycle, artifacts);
   }
 }
 
@@ -1975,6 +2092,15 @@ function knownSecretValues(request, environment) {
   };
   add(request?.secrets);
   for (const repo of request?.repositories ?? []) add(repo?.token);
+  const testAccount = request?.input?.["test-account"] ?? request?.inputs?.["test-account"];
+  if (typeof testAccount === "string") {
+    add(testAccount);
+    try {
+      const parsed = JSON.parse(testAccount);
+      add(parsed?.login);
+      add(parsed?.password);
+    } catch {}
+  }
   for (const name of SECRET_ENV) add(environment[name]);
   return unique(values).sort((left, right) => right.length - left.length);
 }

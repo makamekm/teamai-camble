@@ -70,13 +70,13 @@
     {
       "id": "test",
       "label": "Test",
-      "description": "Run an authenticated fail-closed Android test case with Mobilerun reasoning, vision, secure credentials and durable trajectory evidence.",
+      "description": "Run a fail-closed test case on Desktop Chrome, Mobile Chrome and Android with screenshots; Android uses Mobilerun reasoning, vision and secure test-account credentials.",
       "mode": "write",
-      "confirm": "Build the exact Android artifact and let Mobilerun execute the authenticated test case with reasoning and vision?",
+      "confirm": "Run the selected browser and Android targets, capturing durable screenshot evidence?",
       "capabilities": ["git", "node"],
       "inputs": [
-        { "id": "environment", "label": "Environment", "type": "enum", "required": true, "default": "test.rulet.tv", "options": [{ "value": "test.rulet.tv", "label": "test.rulet.tv" }, { "value": "peprod.rulet.tv", "label": "peprod.rulet.tv" }] },
-        { "id": "targets", "label": "Targets", "type": "multiselect", "required": true, "default": ["Android"], "options": [{ "value": "Android", "label": "Android · Mobilerun Thinking" }] },
+        { "id": "environment", "label": "Environment", "type": "enum", "required": true, "default": "test.rulet.tv", "options": [{ "value": "test.rulet.tv", "label": "test.rulet.tv" }, { "value": "preprod.rulet.tv", "label": "preprod.rulet.tv" }, { "value": "stage.rulet.tv", "label": "stage.rulet.tv · external" }, { "value": "rulet.tv", "label": "rulet.tv · external" }] },
+        { "id": "targets", "label": "Targets", "type": "multiselect", "required": true, "default": ["Desktop", "Chrome", "Android"], "options": [{ "value": "Desktop", "label": "Desktop Chrome" }, { "value": "Chrome", "label": "Mobile Chrome" }, { "value": "Android", "label": "Android · Mobilerun Thinking" }] },
         { "id": "device-id", "label": "Device ID", "type": "string", "required": false },
         { "id": "comment", "label": "Тест-кейс", "type": "string", "required": true },
         { "id": "application-branch", "label": "Application branch", "type": "string", "required": false },

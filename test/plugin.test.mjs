@@ -17,6 +17,7 @@ const D = "d".repeat(40);
 const E = "e".repeat(40);
 const DIGEST_A = `sha256:${"1".repeat(64)}`;
 const DIGEST_B = `sha256:${"2".repeat(64)}`;
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const repositories = [
   { id: "application3", url: "https://github.com/ruletvorg/application3", owner: "ruletvorg", name: "application3", token: "fake" },
   { id: "backend", url: "https://github.com/ruletvorg/backend", owner: "ruletvorg", name: "backend", token: "fake" },
@@ -126,10 +127,10 @@ test("manifest is executable schema v2 with only declared action contract", asyn
     { id: "application-branch", type: "string", required: false },
     { id: "backend-branch", type: "string", required: false },
   ]);
-  assert.deepEqual(chatTest.inputs[0].options.map((item) => item.value), ["test.rulet.tv", "peprod.rulet.tv"]);
+  assert.deepEqual(chatTest.inputs[0].options.map((item) => item.value), ["test.rulet.tv", "preprod.rulet.tv", "stage.rulet.tv", "rulet.tv"]);
   assert.equal(chatTest.inputs[0].default, "test.rulet.tv");
-  assert.deepEqual(chatTest.inputs[1].options.map((item) => item.value), ["Android"]);
-  assert.deepEqual(chatTest.inputs[1].default, ["Android"]);
+  assert.deepEqual(chatTest.inputs[1].options.map((item) => item.value), ["Desktop", "Chrome", "Android"]);
+  assert.deepEqual(chatTest.inputs[1].default, ["Desktop", "Chrome", "Android"]);
   assert.equal(JSON.stringify(manifest).includes("production"), false);
 });
 
@@ -708,7 +709,7 @@ function browserTestRunner(workspace, options = {}) {
       if (args[0] === "--version") return { code: options.chromeMissing ? 1 : 0, stdout: "Google Chrome 140.0.0\n", stderr: "" };
       if (args.includes("--dump-dom")) return { code: 0, stdout: options.invalidDom ? "<html><body>chrome-error://chromewebdata ERR_FAILED</body></html>" : "<!doctype html><html><head><title>Camble Test</title></head><body><div id=\"root\">ready</div></body></html>", stderr: "" };
       const screenshot = args.find((item) => item.startsWith("--screenshot="))?.slice("--screenshot=".length);
-      if (screenshot) await writeFile(screenshot, `browser-${path.basename(screenshot)}`);
+      if (screenshot) await writeFile(screenshot, PNG);
       return { code: 0, stdout: "", stderr: "" };
     },
   });
@@ -719,7 +720,7 @@ async function prepareMobilerunCaseHome(workspace) {
   const teamai = path.join(home, ".teamai");
   const trajectoryRoot = path.join(teamai, "camble-mobilerun-trajectories");
   await mkdir(trajectoryRoot, { recursive: true });
-  await writeFile(path.join(teamai, "camble-mobilerun-config.yaml"), "credentials:\n  enabled: true\n", { mode: 0o600 });
+  await writeFile(path.join(teamai, "camble-mobilerun-config.yaml"), `credentials:\n  enabled: true\n  file_path: ${JSON.stringify(path.join(teamai, "camble-mobilerun-credentials.yaml"))}\n`, { mode: 0o600 });
   await writeFile(path.join(teamai, "camble-mobilerun-credentials.yaml"), [
     "secrets:",
     "  CAMBLE_TEST_EMAIL:",
@@ -803,6 +804,7 @@ function androidTestRunner(workspace, options = {}) {
         if (args[0] === "device" && args[1] === "apps") return { code: 0, stdout: options.failure === "apps" ? "com.android.chrome\n" : "com.rulettv.app  (Camble)\ncom.android.chrome\n", stderr: "" };
         if (args[0] === "device" && args[1] === "start") { mobileUI = "initial"; return { code: 0, stdout: "started\n", stderr: "" }; }
         if (args[0] === "run") {
+          await options.onMobilerunRun?.(args);
           mobilerunRuns += 1;
           const omitTrajectory = options.failure === "trajectory";
           const emptyTrajectory = options.failure === "trajectory-once" && mobilerunRuns === 1;
@@ -834,7 +836,9 @@ function androidTestRunner(workspace, options = {}) {
               { action: "tap", x: 4, y: 4 }, { action: "tap", x: 5, y: 5 },
             ];
             await writeFile(path.join(directory, "macro.json"), JSON.stringify({ macro_schema_version: "1", version: "1", total_actions: actions.length, actions }));
-            const terminal = options.failure === "terminal-boundary"
+            const terminal = options.terminalReason
+              ? { type: "ResultEvent", success: false, reason: options.terminalReason }
+              : options.failure === "terminal-boundary"
               ? { type: "ResultEvent", success: false, reason: `${"x".repeat(1_998)}qa-existing@example.com` }
               : options.failure === "existing-account-mismatch"
               ? { type: "ManagerPlanDetailsEvent", success: false, answer: "The provided email is not recognized as an existing account and the flow is attempting to create a new password." }
@@ -849,7 +853,7 @@ function androidTestRunner(workspace, options = {}) {
               ? [{ type: "ResultEvent", success: true, answer: "Premature result" }, terminal]
               : [terminal];
             await writeFile(path.join(directory, "trajectory.json"), JSON.stringify(trajectory));
-            for (let index = 0; index < 4; index += 1) await writeFile(path.join(screenshots, `${String(index).padStart(4, "0")}.png`), `trajectory-screenshot-${index}`);
+            for (let index = 0; index < 4; index += 1) await writeFile(path.join(screenshots, `${String(index).padStart(4, "0")}.png`), PNG);
           }
           mobileUI = new Set(["final-feed", "final-feed-stubborn"]).has(options.failure) ? "feed" : "final";
           return { code: omitTrajectory || emptyTrajectory || new Set(["thinking", "existing-account-mismatch", "terminal-reason", "terminal-boundary"]).has(options.failure) ? 3 : 0, stdout: "Mobilerun reasoning complete\n", stderr: "" };
@@ -889,7 +893,7 @@ function androidTestRunner(workspace, options = {}) {
         if (args[0] === "device" && args[1] === "screenshot") {
           screenshotNumber += 1;
           const screenshot = path.join(workspace, `mobilerun-${screenshotNumber}.png`);
-          await writeFile(screenshot, `mobile-screenshot-${screenshotNumber}`);
+          await writeFile(screenshot, PNG);
           return { code: 0, stdout: `${screenshot}\n`, stderr: "" };
         }
         return { code: 0, stdout: "ok\n", stderr: "" };
@@ -917,16 +921,15 @@ function androidTestRequest(workspace) {
   return value;
 }
 
-test("chat test validation requires an explicit Android case and rejects browser smoke targets before work", async () => {
+test("chat test validation accepts declared platforms and rejects unknown environment/targets before work", async () => {
   const workspace = await root();
   const valid = { environment: "test.rulet.tv", targets: ["Android"], comment: "verify the exact mobile bug" };
   const cases = [
     {},
     { targets: ["Android"], comment: valid.comment },
-    { environment: "preprod.rulet.tv", targets: ["Android"], comment: valid.comment },
+    { environment: "unknown.rulet.tv", targets: ["Android"], comment: valid.comment },
     { environment: "test.rulet.tv", targets: [], comment: valid.comment },
-    { environment: "test.rulet.tv", targets: ["Desktop"], comment: valid.comment },
-    { environment: "test.rulet.tv", targets: ["Chrome"], comment: valid.comment },
+
     { environment: "test.rulet.tv", targets: ["android"], comment: valid.comment },
     { ...valid, comment: "" },
     { ...valid, "device-id": "bad device" },
@@ -942,6 +945,33 @@ test("chat test validation requires an explicit Android case and rejects browser
     assert.equal(result.exitCode, 1);
     assert.equal(runner.calls.length, 0);
   }
+});
+
+test("Desktop and Mobile Chrome targets run independently with exact responsive screenshot artifacts", async () => {
+  const workspace = await root();
+  const runner = browserTestRunner(workspace);
+  const value = request("test", {
+    environment: "stage.rulet.tv",
+    targets: ["Desktop", "Chrome"],
+    comment: "verify responsive landing state",
+    "application-branch": "feature/chat-test",
+    "backend-branch": "fix/chat-test",
+  }, workspace);
+  const result = await execute(value, { runner, chromePath: "chrome", fetch: async (url) => htmlResponse(String(url)) });
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.output.steps.map((step) => [step.id, step.target, step.status]), [
+    ["resolve-sources", null, "passed"],
+    ["desktop-chrome", "Desktop", "passed"],
+    ["mobile-chrome", "Chrome", "passed"],
+  ]);
+  assert.deepEqual(result.output.targets.map(({ target, status }) => ({ target, status })), [{ target: "Desktop", status: "passed" }, { target: "Chrome", status: "passed" }]);
+  assert.equal(result.artifacts.filter((artifact) => artifact.type === "screenshot").length, 2);
+  assert.equal(result.output.screenshots.length, 2);
+  const chromeCalls = runner.calls.filter((call) => call.command === "chrome");
+  assert.equal(chromeCalls.filter((call) => call.args[0] === "--version").length, 1);
+  assert.ok(chromeCalls.some((call) => call.args.includes("--window-size=1440,1000")));
+  assert.ok(chromeCalls.some((call) => call.args.includes("--window-size=390,844") && call.args.includes("--touch-events=enabled") && call.args.some((arg) => arg.startsWith("--user-agent="))));
+  for (const artifact of result.artifacts) assert.ok((await stat(path.join(workspace, artifact.path))).isFile());
 });
 
 test("chat scheduler repository branch bindings remain the immutable Android source", async () => {
@@ -964,8 +994,9 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   const runner = androidTestRunner(workspace);
   const result = await execute(androidTestRequest(workspace), { runner, apksignerPath: "apksigner", mobilerunPath: "mobilerun", environment, sleep: async () => {} });
   assert.equal(result.status, "ok");
-  assert.equal(result.summary, "Camble authenticated Mobilerun test case passed");
+  assert.equal(result.summary, "Camble Chat Test passed with durable screenshot evidence");
   assert.equal(result.output.status, "passed");
+  assert.deepEqual(result.output.account, { mode: "managed-auto", id: null });
   assert.deepEqual(result.output.steps.map((item) => [item.id, item.status]), [
     ["resolve-sources", "passed"],
     ["build-android", "passed"],
@@ -991,11 +1022,13 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   assert.equal((await readFile(path.join(workspace, apk.path), "utf8")), "signed-apk-content https://test.rulet.tv");
   assert.equal(result.artifacts.some((item) => item.type === "apk"), false, "Chat Test must not upload its large transient APK");
   assert.equal(result.artifacts.filter((item) => item.type === "test-evidence").length, 0);
-  assert.equal(result.artifacts.filter((item) => item.type === "screenshot").length, 0);
-  assert.equal(result.output.screenshots.length, 1);
+  assert.equal(result.artifacts.filter((item) => item.type === "screenshot").length, 2);
+  assert.equal(result.output.screenshots.length, 2);
   assert.ok(result.output.screenshots.every((item) => /^[0-9a-f]{64}$/.test(item.sha256)));
   const durableVerification = result.output.steps.find((item) => item.id === "verify-mobile-case").evidence;
   assert.match(durableVerification.targetScreenshot.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(durableVerification.targetScreenshot.kind, "target-screen");
+  assert.ok(result.artifacts.some((item) => item.path === durableVerification.targetScreenshot.path));
   const mobileCalls = runner.calls.filter((call) => call.command === "mobilerun");
   assert.deepEqual(mobileCalls.slice(0, 6).map((call) => call.args.slice(0, 2).join(" ")), ["--version", "devices", "ping -d", "device start", "device screenshot", "run -c"]);
   const adbCalls = runner.calls.filter((call) => call.command === "adb");
@@ -1009,6 +1042,7 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "ui").length, 0);
   assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "screenshot").length, 1);
   const thinking = mobileCalls.find((call) => call.args[0] === "run");
+  assert.deepEqual(thinking.options.env, { TEAMAI_MOBILERUN_ALLOWED_HTTPS_HOSTS: "test.rulet.tv" });
   assert.ok(thinking.args.includes("--reasoning"));
   assert.ok(thinking.args.includes("--vision"));
   assert.ok(thinking.args.includes("--no-stream"));
@@ -1033,6 +1067,73 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   assert.deepEqual(verification.interactionAssertions.map((item) => item.control), ["chat", "gift", "close"]);
   assert.ok(verification.interactionAssertions.every((item) => item.preStateSha256 !== item.nextStateSha256));
   assert.equal(runner.calls.some((call) => call.command === "git" && call.args[0] === "push"), false);
+});
+
+test("selected matrix account uses ephemeral 0600 Mobilerun credentials and is redacted and removed", async () => {
+  const workspace = await root();
+  const environment = await prepareMobilerunCaseHome(workspace);
+  const login = "matrix-selected@example.com";
+  const password = "matrix-\"private\\value";
+  let inspected = false;
+  const runner = androidTestRunner(workspace, {
+    onMobilerunRun: async (args) => {
+      const configPath = args[args.indexOf("-c") + 1];
+      const config = await readFile(configPath, "utf8");
+      const rawCredentials = /^\s*file_path:\s*(.+)$/m.exec(config)?.[1];
+      assert.ok(rawCredentials);
+      const credentialsPath = JSON.parse(rawCredentials);
+      const contents = await readFile(credentialsPath, "utf8");
+      assert.match(contents, /CAMBLE_TEST_EMAIL/);
+      assert.match(contents, /CAMBLE_TEST_PASSWORD/);
+      assert.ok(contents.includes(JSON.stringify(login)));
+      assert.ok(contents.includes(JSON.stringify(password)));
+      assert.equal((await stat(configPath)).mode & 0o777, 0o600);
+      assert.equal((await stat(credentialsPath)).mode & 0o777, 0o600);
+      inspected = true;
+    },
+  });
+  const value = androidTestRequest(workspace);
+  value.input["test-account"] = JSON.stringify({
+    id: "10000000-0000-4000-8000-000000000001",
+    projectId: "20000000-0000-4000-8000-000000000002",
+    environment: "test.rulet.tv",
+    login,
+    password,
+    selection: "selected",
+  });
+  const result = await executeContract(value, { runner, apksignerPath: "apksigner", mobilerunPath: "mobilerun", environment, sleep: async () => {} });
+  assert.equal(result.response.status, "ok");
+  assert.equal(inspected, true);
+  assert.deepEqual(result.response.output.account, { mode: "selected", id: "10000000-0000-4000-8000-000000000001" });
+  assert.equal(result.response.output.steps.find((step) => step.id === "mobilerun-thinking").evidence.credentialSource, "matrix");
+  assert.equal(JSON.stringify(result.response).includes(login), false);
+  assert.equal(JSON.stringify(result.response).includes(password), false);
+  await assert.rejects(() => stat(path.join(workspace, ".teamai-test-account.yaml")), /ENOENT/);
+  await assert.rejects(() => stat(path.join(workspace, ".teamai-mobilerun-config.yaml")), /ENOENT/);
+});
+
+test("selected matrix credentials are redacted from hostile Mobilerun terminal output", async () => {
+  const workspace = await root();
+  const environment = await prepareMobilerunCaseHome(workspace);
+  const login = "hostile-output@example.com";
+  const password = "hostile-output-password";
+  const runner = androidTestRunner(workspace, { terminalReason: `failure ${login} ${password}` });
+  const value = androidTestRequest(workspace);
+  value.input["test-account"] = JSON.stringify({
+    id: "10000000-0000-4000-8000-000000000001",
+    projectId: "20000000-0000-4000-8000-000000000002",
+    environment: "test.rulet.tv",
+    login,
+    password,
+    selection: "selected",
+  });
+  const result = await executeContract(value, { runner, apksignerPath: "apksigner", mobilerunPath: "mobilerun", environment, sleep: async () => {} });
+  assert.equal(result.response.status, "error");
+  const serialized = JSON.stringify(result.response);
+  assert.equal(serialized.includes(login), false);
+  assert.equal(serialized.includes(password), false);
+  assert.match(serialized, /\[REDACTED\]/);
+  assert.equal(result.response.artifacts.filter((artifact) => artifact.type === "screenshot").length, 1);
 });
 
 test("Android retries Mobilerun once only when the first attempt produces no durable trajectory", async () => {
@@ -1099,7 +1200,8 @@ test("Android fails terminally when credentials, signing, device, Mobilerun or t
     assert.equal(result.response.output.status, "failed", fixture.failure);
     assert.equal(result.response.output.steps.find((item) => item.id === fixture.step).status, "failed", fixture.failure);
     assert.equal(result.response.output.verdict, "failed", fixture.failure);
-    assert.equal(result.response.artifacts.length, 0, `${fixture.failure} failure must not be replaced by a secondary artifact transport error`);
+    const failureAfterScreenshot = new Set(["thinking", "existing-account-mismatch", "terminal-reason", "terminal-boundary", "terminal-missing", "credential-evidence", "trajectory-controls", "trajectory-noop"]);
+    assert.equal(result.response.artifacts.length, failureAfterScreenshot.has(fixture.failure) ? 1 : 0, `${fixture.failure} must preserve only screenshots captured before failure`);
     if (new Set(["thinking", "existing-account-mismatch", "terminal-reason", "terminal-boundary", "terminal-missing", "credential-evidence"]).has(fixture.failure)) {
       const evidence = result.response.output.steps.find((item) => item.id === "mobilerun-thinking").evidence;
       assert.equal(evidence.trajectory.evidenceFiles.length, 2, `${fixture.failure} must retain trajectory hashes`);
