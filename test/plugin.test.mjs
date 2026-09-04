@@ -1036,8 +1036,9 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   assert.ok(result.output.screenshots.every((item) => /^[0-9a-f]{64}$/.test(item.sha256)));
   const durableVerification = result.output.steps.find((item) => item.id === "verify-mobile-case").evidence;
   assert.match(durableVerification.targetScreenshot.sha256, /^[0-9a-f]{64}$/);
-  assert.equal(durableVerification.targetScreenshot.kind, "target-screen");
+  assert.equal(durableVerification.targetScreenshot.kind, "after-thinking");
   assert.ok(result.artifacts.some((item) => item.path === durableVerification.targetScreenshot.path));
+  assert.deepEqual(durableVerification.finalUiControls.map((control) => control.id), ["chat", "gift", "close"]);
   const mobileCalls = runner.calls.filter((call) => call.command === "mobilerun");
   assert.deepEqual(mobileCalls.slice(0, 6).map((call) => call.args.slice(0, 2).join(" ")), ["--version", "devices", "ping -d", "device start", "device screenshot", "run -c"]);
   const adbCalls = runner.calls.filter((call) => call.command === "adb");
@@ -1048,8 +1049,8 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   assert.equal(installedArtifact.backend.selectedHost, "https://test.rulet.tv");
   assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "tap").length, 0);
   assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "press").length, 0);
-  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "ui").length, 0);
-  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "screenshot").length, 1);
+  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "ui").length, 1);
+  assert.equal(mobileCalls.filter((call) => call.args[0] === "device" && call.args[1] === "screenshot").length, 2);
   const thinking = mobileCalls.find((call) => call.args[0] === "run");
   assert.deepEqual(thinking.options.env, { TEAMAI_MOBILERUN_ALLOWED_HTTPS_HOSTS: "test.rulet.tv" });
   assert.ok(thinking.args.includes("--reasoning"));
@@ -1200,6 +1201,7 @@ test("Android fails terminally when credentials, signing, device, Mobilerun or t
     { failure: "runtime-config", step: "mobilerun-thinking", message: /selected a runtime backend conflicting with test.rulet.tv/ },
     { failure: "runtime-marker", step: "mobilerun-thinking", message: /did not emit runtime backend config for test.rulet.tv/ },
     { failure: "credential-evidence", step: "mobilerun-thinking", message: /does not prove use of the configured test account/ },
+    { failure: "final-ui", step: "mobilerun-thinking", message: /does not expose gift/ },
     { failure: "thinking", step: "mobilerun-thinking", message: /The autonomous case failed/ },
     { failure: "existing-account-mismatch", step: "mobilerun-thinking", message: /existing-account environment mismatch: The provided email is not recognized as an existing account and the flow is attempting to create a new password/ },
     { failure: "terminal-reason", step: "mobilerun-thinking", message: /Mobilerun terminal failure: The target profile could not be reached/ },
@@ -1220,8 +1222,9 @@ test("Android fails terminally when credentials, signing, device, Mobilerun or t
     assert.equal(result.response.output.status, "failed", fixture.failure);
     assert.equal(result.response.output.steps.find((item) => item.id === fixture.step).status, "failed", fixture.failure);
     assert.equal(result.response.output.verdict, "failed", fixture.failure);
-    const failureAfterScreenshot = new Set(["thinking", "existing-account-mismatch", "terminal-reason", "terminal-boundary", "terminal-missing", "credential-evidence", "trajectory-controls", "trajectory-noop"]);
-    assert.equal(result.response.artifacts.length, failureAfterScreenshot.has(fixture.failure) ? 1 : 0, `${fixture.failure} must preserve only screenshots captured before failure`);
+    const failureAfterInitialScreenshot = new Set(["thinking", "existing-account-mismatch", "terminal-reason", "terminal-boundary", "terminal-missing", "credential-evidence", "final-ui"]);
+    const failureAfterFinalScreenshot = new Set(["trajectory-controls", "trajectory-noop"]);
+    assert.equal(result.response.artifacts.length, failureAfterFinalScreenshot.has(fixture.failure) ? 2 : failureAfterInitialScreenshot.has(fixture.failure) ? 1 : 0, `${fixture.failure} must preserve only screenshots captured before failure`);
     if (new Set(["thinking", "existing-account-mismatch", "terminal-reason", "terminal-boundary", "terminal-missing", "credential-evidence"]).has(fixture.failure)) {
       const evidence = result.response.output.steps.find((item) => item.id === "mobilerun-thinking").evidence;
       assert.equal(evidence.trajectory.evidenceFiles.length, 2, `${fixture.failure} must retain trajectory hashes`);
