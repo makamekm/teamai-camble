@@ -957,8 +957,11 @@ test("Desktop and Mobile Chrome targets run independently with exact responsive 
     "application-branch": "feature/chat-test",
     "backend-branch": "fix/chat-test",
   }, workspace);
-  const result = await execute(value, { runner, chromePath: "chrome", fetch: async (url) => htmlResponse(String(url)) });
+  value.secrets = { ANDROID_UPLOAD_KEY_ALIAS: "rulet" };
+  const contract = await executeContract(value, { runner, chromePath: "chrome", fetch: async (url) => htmlResponse(String(url)) });
+  const result = contract.response;
   assert.equal(result.status, "ok");
+  assert.equal(contract.exitCode, 0);
   assert.deepEqual(result.output.steps.map((step) => [step.id, step.target, step.status]), [
     ["resolve-sources", null, "passed"],
     ["desktop-chrome", "Desktop", "passed"],
@@ -966,6 +969,7 @@ test("Desktop and Mobile Chrome targets run independently with exact responsive 
   ]);
   assert.deepEqual(result.output.targets.map(({ target, status }) => ({ target, status })), [{ target: "Desktop", status: "passed" }, { target: "Chrome", status: "passed" }]);
   assert.equal(result.artifacts.filter((artifact) => artifact.type === "screenshot").length, 2);
+  assert.ok(result.artifacts.every((artifact) => artifact.path.includes("rulet.tv") && !artifact.path.includes("[REDACTED]")));
   assert.equal(result.output.screenshots.length, 2);
   const chromeCalls = runner.calls.filter((call) => call.command === "chrome");
   assert.equal(chromeCalls.filter((call) => call.args[0] === "--version").length, 1);

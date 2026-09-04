@@ -2090,7 +2090,9 @@ function knownSecretValues(request, environment) {
     seen.add(value);
     for (const nested of Object.values(value)) add(nested);
   };
-  add(request?.secrets);
+  for (const [name, value] of Object.entries(request?.secrets ?? {})) {
+    if (!String(name).toUpperCase().endsWith("_KEY_ALIAS")) add(value);
+  }
   for (const repo of request?.repositories ?? []) add(repo?.token);
   const testAccount = request?.input?.["test-account"] ?? request?.inputs?.["test-account"];
   if (typeof testAccount === "string") {
@@ -2101,7 +2103,7 @@ function knownSecretValues(request, environment) {
       add(parsed?.password);
     } catch {}
   }
-  for (const name of SECRET_ENV) add(environment[name]);
+  for (const name of SECRET_ENV) if (!name.endsWith("_KEY_ALIAS")) add(environment[name]);
   return unique(values).sort((left, right) => right.length - left.length);
 }
 function redactResponse(value, secrets) {
