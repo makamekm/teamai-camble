@@ -738,6 +738,7 @@ function androidTestRunner(workspace, options = {}) {
   let mobileUI = "initial";
   let screenshotNumber = 0;
   let mobilerunRuns = 0;
+  let deviceListCalls = 0;
   let feedTapAttempts = 0;
   const signedApkContent = options.failure === "runtime-host"
     ? "signed-apk-content https://stage.rulet.tv"
@@ -798,7 +799,11 @@ function androidTestRunner(workspace, options = {}) {
       }
       if (command === "mobilerun") {
         if (args[0] === "--version") return { code: 0, stdout: "mobilerun 1.0\n", stderr: "" };
-        if (args[0] === "devices") return { code: 0, stdout: options.failure === "device" ? "No local devices connected.\n" : "Found 1 local device(s):\n  • DEVICE-1\n", stderr: "" };
+        if (args[0] === "devices") {
+          deviceListCalls += 1;
+          if (options.failure === "devices-transient" && deviceListCalls === 1) throw new PluginError("mobilerun timed out after 20000ms");
+          return { code: 0, stdout: options.failure === "device" ? "No local devices connected.\n" : "Found 1 local device(s):\n  • DEVICE-1\n", stderr: "" };
+        }
         if (args[0] === "ping") return { code: options.failure === "ping" ? 1 : 0, stdout: "ready\n", stderr: "" };
         if (args[0] === "device" && args[1] === "install") return { code: options.failure === "install" ? 2 : 0, stdout: "installed\n", stderr: "" };
         if (args[0] === "device" && args[1] === "apps") return { code: 0, stdout: options.failure === "apps" ? "com.android.chrome\n" : "com.rulettv.app  (Camble)\ncom.android.chrome\n", stderr: "" };
@@ -1071,6 +1076,17 @@ test("Android uses Mobilerun reasoning, vision, secure credential IDs and durabl
   assert.deepEqual(verification.interactionAssertions.map((item) => item.control), ["chat", "gift", "close"]);
   assert.ok(verification.interactionAssertions.every((item) => item.preStateSha256 !== item.nextStateSha256));
   assert.equal(runner.calls.some((call) => call.command === "git" && call.args[0] === "push"), false);
+});
+
+test("Android retries one transient Mobilerun device discovery timeout after a long build", async () => {
+  const workspace = await root();
+  const environment = await prepareMobilerunCaseHome(workspace);
+  const runner = androidTestRunner(workspace, { failure: "devices-transient" });
+  const result = await execute(androidTestRequest(workspace), { runner, apksignerPath: "apksigner", mobilerunPath: "mobilerun", environment, sleep: async () => {} });
+  assert.equal(result.status, "ok");
+  const discovery = result.output.steps.find((step) => step.id === "resolve-device").evidence;
+  assert.equal(discovery.discoveryAttempts, 2);
+  assert.equal(runner.calls.filter((call) => call.command === "mobilerun" && call.args[0] === "devices").length, 2);
 });
 
 test("selected matrix account uses ephemeral 0600 Mobilerun credentials and is redacted and removed", async () => {

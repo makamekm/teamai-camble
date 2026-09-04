@@ -1061,7 +1061,17 @@ function parseMobilerunDevices(output) {
 }
 async function resolveMobilerun(request, deps, requestedDeviceId) {
   const executable = await executableCandidate(deps.runner, [deps.mobilerunPath, request.tools?.mobilerun, "mobilerun"], ["--version"], "Mobilerun");
-  const listed = await deps.runner(executable, ["devices"], { allowFailure: true, timeoutMs: 20_000, maxOutput: 256 * 1024 });
+  let listed = null;
+  let discoveryAttempts = 0;
+  while (!listed && discoveryAttempts < 2) {
+    discoveryAttempts += 1;
+    try {
+      listed = await deps.runner(executable, ["devices"], { allowFailure: true, timeoutMs: 60_000, maxOutput: 256 * 1024 });
+    } catch (error) {
+      if (discoveryAttempts >= 2) throw error;
+      await deps.sleep(1_000);
+    }
+  }
   if (listed.code !== 0) fail("Mobilerun device discovery failed");
   const devices = parseMobilerunDevices(listed.stdout);
   const deviceId = requestedDeviceId ?? (devices.length === 1 ? devices[0] : null);
@@ -1069,7 +1079,7 @@ async function resolveMobilerun(request, deps, requestedDeviceId) {
   if (!devices.includes(deviceId)) fail(`Mobilerun device ${deviceId} is not in the fresh device list`);
   const ping = await deps.runner(executable, ["ping", "-d", deviceId], { allowFailure: true, timeoutMs: 20_000, maxOutput: 256 * 1024 });
   if (ping.code !== 0) fail(`Mobilerun device ${deviceId} is unavailable`);
-  return { executable, deviceId, discoveredDevices: devices.length };
+  return { executable, deviceId, discoveredDevices: devices.length, discoveryAttempts };
 }
 async function resolveAdb(request, deps) {
   const candidates = [deps.adbPath, request.tools?.adb];
@@ -1576,7 +1586,7 @@ async function cambleTest(request, deps) {
       await runTestStep(lifecycle, "resolve-device", deps, async () => {
         const result = await resolveMobilerun(request, deps, input.deviceId);
         mobile = result;
-        return { deviceId: result.deviceId, discoveredDevices: result.discoveredDevices, executable: path.basename(result.executable) };
+        return { deviceId: result.deviceId, discoveredDevices: result.discoveredDevices, discoveryAttempts: result.discoveryAttempts, executable: path.basename(result.executable) };
       });
       await runTestStep(lifecycle, "install-android", deps, async () => {
         adb = await resolveAdb(request, deps);
