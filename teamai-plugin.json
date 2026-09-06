@@ -32,6 +32,7 @@
       "inputs": [
         { "id": "environment", "label": "Environment", "type": "enum", "required": true, "default": "preprod", "options": [{ "value": "preprod", "label": "Preprod" }, { "value": "prod", "label": "Prod" }] },
         { "id": "items", "label": "Services", "type": "multiselect", "required": true },
+        { "id": "confirmed-plan", "label": "Confirmed SHA plan (JSON from collect/UI or dry-run)", "type": "string", "required": false },
         { "id": "dry-run", "label": "Dry run", "type": "boolean", "required": true, "default": true }
       ]
     },

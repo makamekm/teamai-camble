@@ -223,7 +223,8 @@ test("multi-service promotion uses guarded writes and rolls back earlier writes 
     },
     failPush: ({ pushNumber }) => pushNumber === 2 ? 7 : 0,
   });
-  const result = await executeContract(request("promote", { environment: "prod", items: ["application3", "component"], dryRun: false }, workspace), { runner });
+  const confirmed = JSON.stringify({ version: 1, environment: "prod", services: [["application3", A, C], ["component", B, D]] });
+  const result = await executeContract(request("promote", { environment: "prod", items: ["application3", "component"], "confirmed-plan": confirmed, dryRun: false }, workspace), { runner });
   assert.equal(result.exitCode, 1);
   assert.equal(result.response.status, "error");
   assert.equal(result.response.output.failure.original.item, "component");
@@ -541,7 +542,7 @@ test("cluster branch failure rolls back only plugin-updated branches and enumera
     ["immutable-tag", "admin-ui", "created", undefined],
     ["immutable-tag", "component", "created", undefined],
     ["branch", "admin-ui", "succeeded", "succeeded"],
-    ["branch", "component", "failed", "not-needed"],
+    ["branch", "component", "push-failed", "not-needed"],
   ]);
   assert.equal(result.response.output.failure.original.outcome, "push-failed");
   assert.equal(result.response.output.failure.rollback.outcome, "restored");

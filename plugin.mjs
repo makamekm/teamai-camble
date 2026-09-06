@@ -2,7 +2,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { chmod, mkdir, readFile, readdir, writeFile, copyFile, stat, unlink } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, writeFile, copyFile, stat, unlink, realpath } from "node:fs/promises";
+import { CancellationError, createCancellation, createRecoveryJournal } from "./recovery.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -61,10 +62,15 @@ const boolean = (value, fallback = false) => {
 };
 const unique = (values) => [...new Set(values)];
 
-function subprocessEnvironment(environment, additions = {}) {
-  const selected = { GIT_TERMINAL_PROMPT: "0" };
+function subprocessEnvironment(environment, additions = {}, git = false) {
+  const selected = {};
   for (const name of INHERITED_ENV) if (typeof environment[name] === "string") selected[name] = environment[name];
-  for (const [name, value] of Object.entries(additions)) if (value !== undefined) selected[name] = String(value);
+  const gitName = (name) => /^(?:GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+|NOSYSTEM|GLOBAL)|GIT_TERMINAL_PROMPT|GCM_INTERACTIVE|TEAMAI_AGENT_EXECUTABLE|TEAMAI_GIT_CREDENTIAL_MAP|TEAMAI_GIT_TOKEN_\d+)$/.test(name);
+  if (git) {
+    Object.assign(selected, { GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "Never", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null" });
+    for (const [name, value] of Object.entries(environment)) if (gitName(name) && typeof value === "string") selected[name] = value;
+  }
+  for (const [name, value] of Object.entries(additions)) if (value !== undefined && (git || !gitName(name))) selected[name] = String(value);
   return selected;
 }
 function quoteWindowsCommandArgument(value) {
@@ -84,11 +90,18 @@ export function createCommandRunner(options = {}) {
   const platform = options.platform ?? process.platform;
   const environment = options.environment ?? process.env;
   const spawnImpl = options.spawnImpl ?? spawn;
+  const tools = options.tools ?? {};
+  const defaultSignal = options.signal;
   return async (command, args, options = {}) => new Promise((resolve, reject) => {
-    const invocation = commandInvocation(platform, environment, command, args);
+    const executable = tools[command] ?? command;
+    if (tools[command] !== undefined && (typeof executable !== "string" || !(platform === "win32" ? path.win32 : path).isAbsolute(executable) || /[\0\r\n]/.test(executable))) return reject(new PluginError(`Invalid absolute tool path for ${command}`));
+    const signal = options.signal ?? defaultSignal;
+    if (signal?.aborted) return reject(new CancellationError());
+    const invocation = commandInvocation(platform, environment, executable, args);
     const child = spawnImpl(invocation.command, invocation.args, {
       cwd: options.cwd,
-      env: subprocessEnvironment(environment, options.env),
+      env: subprocessEnvironment(environment, options.env, command === "git" || (tools.git !== undefined && command === tools.git)),
+      shell: false,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments ?? false,
@@ -106,7 +119,7 @@ export function createCommandRunner(options = {}) {
     child.stderr.on("data", collect(stderr));
     let settled = false;
     let timedOut = false;
-    const timeoutMs = options.timeoutMs;
+    const timeoutMs = options.timeoutMs ?? 120_000;
     if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60 * 60 * 1000)) {
       child.kill("SIGKILL");
       return reject(new PluginError("Invalid subprocess timeout"));
@@ -115,16 +128,21 @@ export function createCommandRunner(options = {}) {
       timedOut = true;
       child.kill("SIGKILL");
     }, timeoutMs);
+    const abort = () => child.kill("SIGKILL");
+    signal?.addEventListener("abort", abort, { once: true });
     child.on("error", () => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
       reject(new PluginError("Subprocess could not be started"));
     });
     child.on("close", (code) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      if (signal?.aborted) return reject(new CancellationError());
       if (timedOut) return reject(new PluginError(`${path.basename(command)} timed out after ${timeoutMs}ms`));
       const result = {
         code: code ?? 1,
@@ -168,7 +186,7 @@ function repository(request, id) {
   return found;
 }
 function workspace(request) {
-  const root = request.workspace?.path ?? request.workspacePath ?? request.workspace;
+  const root = request.workspace?.path ?? request.workspace?.root ?? request.workspacePath ?? request.workspace;
   if (typeof root !== "string" || !path.isAbsolute(root)) fail("Missing absolute workspace path");
   return root;
 }
@@ -209,11 +227,38 @@ async function verifySource(runner, repo, branch, expected) {
   const actual = await exactRef(runner, repo, branch);
   if (actual !== expected) fail(`${repo.id}:${branch} moved; collect a new snapshot`);
 }
-function pushSpec(ref, sha, force = true) {
-  return `${force ? "+" : ""}${sha}:${ref}`;
+async function prepareGitRepositories(request, deps, updates) {
+  const root = await realpath(workspace(request));
+  deps.gitRepositories = new Map();
+  for (const id of unique(updates.map((update) => update.repository))) {
+    const repo = repository(request, id);
+    if (repo.path && repo.workspacePath && repo.path !== repo.workspacePath) fail(`Conflicting ${id} checkout paths`);
+    let checkout = repo.path ?? repo.workspacePath;
+    if (checkout === undefined) {
+      checkout = path.join(root, "git-objects", id);
+      await mkdir(checkout, { recursive: true, mode: 0o700 });
+      await deps.runner("git", ["init", "--bare", checkout]);
+    }
+    if (typeof checkout !== "string" || !path.isAbsolute(checkout)) fail(`Missing absolute ${id} checkout`);
+    checkout = await realpath(checkout);
+    const relative = path.relative(root, checkout);
+    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) fail(`${id} checkout escapes workspace`);
+    const context = { ...repo, path: checkout };
+    deps.gitRepositories.set(id, context);
+    // Capture rollback objects too, before any write can make them unreachable.
+    const shas = unique(updates.filter((update) => update.repository === id).flatMap((update) => [update.sha, update.originalSha ?? update.originalBranchSha]).filter(Boolean));
+    for (const sha of shas) {
+      clean(sha, "commit SHA", SHA);
+      if (/^0+$/.test(sha)) fail("Zero is not a commit SHA");
+      await deps.runner("git", ["fetch", "--no-tags", repo.url, sha], { cwd: checkout });
+      await deps.runner("git", ["cat-file", "-e", `${sha}^{commit}`], { cwd: checkout });
+    }
+  }
 }
-async function pushRef(runner, repo, ref, sha, force) {
-  await runner("git", ["push", repo.url, pushSpec(ref, sha, force)]);
+function mutationRepository(deps, id) {
+  const repo = deps.gitRepositories?.get(id);
+  if (!repo) fail(`Unprepared ${id} Git context`);
+  return repo;
 }
 class RefUpdateError extends Error {
   constructor(outcome, expectedSha, actualSha = null) {
@@ -231,21 +276,27 @@ class ProvenanceMismatchError extends Error {
     this.records = records;
   }
 }
-async function pushRefWithLease(runner, repo, ref, sha, expectedSha) {
-  clean(sha, "target SHA", SHA);
+async function pushRefWithLease(runner, repo, ref, sha, expectedSha, recoveryRunner = runner) {
+  if (sha !== null) clean(sha, "target SHA", SHA);
   if (expectedSha !== null) clean(expectedSha, "expected SHA", SHA);
+  if (!path.isAbsolute(repo.path ?? "")) fail("Missing prepared repository checkout");
   try {
-    const result = await runner("git", ["push", `--force-with-lease=${ref}:${expectedSha ?? ""}`, repo.url, `${sha}:${ref}`], { allowFailure: true });
-    if (result.code === 0) return;
+    const result = await runner("git", ["push", `--force-with-lease=${ref}:${expectedSha ?? ""}`, repo.url, `${sha ?? ""}:${ref}`, "--no-follow-tags", "--recurse-submodules=no"], { cwd: repo.path, allowFailure: true });
+    if (result.code === 0) {
+      const actual = await optionalRef(recoveryRunner, repo, ref);
+      if (actual === sha) return;
+      throw new RefUpdateError("lease-conflict", expectedSha, actual);
+    }
   } catch {
     // Classify the failure by re-reading the guarded ref below.
   }
   try {
-    const actualSha = await optionalRef(runner, repo, ref);
+    const actualSha = await optionalRef(recoveryRunner, repo, ref);
+    if (actualSha === sha) return; // Lost acknowledgement: reconcile before compensation.
     if (actualSha !== expectedSha) throw new RefUpdateError("lease-conflict", expectedSha, actualSha);
   } catch (error) {
     if (error instanceof RefUpdateError) throw error;
-    throw new RefUpdateError("push-failed", expectedSha);
+    throw new RefUpdateError("unknown", expectedSha);
   }
   throw new RefUpdateError("push-failed", expectedSha, expectedSha);
 }
@@ -314,12 +365,14 @@ export async function planPromotion(request, deps) {
   if (!new Set(["preprod", "prod"]).has(environment)) fail("Invalid environment");
   if (!Array.isArray(input.items) || input.items.length === 0 || input.items.length > 100) fail("Select at least one item");
   const selectedItems = unique(input.items.map((item) => clean(item, "item")));
+  const confirmed = parseConfirmedPlan(input["confirmed-plan"], environment, selectedItems, !boolean(input.dryRun, true));
   const updates = [];
   for (const item of selectedItems) {
     const coordinates = serviceCoordinates(environment, item);
     const repo = repository(request, coordinates.repositoryId);
     const sourceSha = await exactRef(deps.runner, repo, coordinates.sourceBranch);
     const originalSha = await optionalRef(deps.runner, repo, `refs/heads/${coordinates.targetBranch}`);
+    if (confirmed && (confirmed.get(item)[0] !== sourceSha || confirmed.get(item)[1] !== originalSha)) fail(`${item} refs moved; collect a new snapshot and confirm again`);
     updates.push({
       item,
       repository: coordinates.repositoryId,
@@ -331,6 +384,22 @@ export async function planPromotion(request, deps) {
     });
   }
   return { environment, selectedItems, updates };
+}
+function parseConfirmedPlan(value, environment, selectedItems, required) {
+  if (value === undefined && !required) return null;
+  if (typeof value !== "string" || value.length > 20_000) fail("Missing or invalid confirmed-plan; collect and confirm exact SHAs");
+  let plan;
+  try { plan = JSON.parse(value); } catch { fail("Invalid confirmed-plan JSON"); }
+  if (plan?.version !== 1 || plan.environment !== environment || !Array.isArray(plan.services) || plan.services.length !== selectedItems.length) fail("Confirmed plan does not match selected environment/services");
+  const result = new Map();
+  for (const row of plan.services) {
+    if (!Array.isArray(row) || row.length !== 3 || !selectedItems.includes(row[0]) || result.has(row[0])) fail("Invalid confirmed-plan service");
+    clean(row[1], "confirmed source SHA", SHA);
+    if (/^0+$/.test(row[1])) fail("Zero is not a source SHA");
+    if (row[2] !== null) { clean(row[2], "confirmed target SHA", SHA); if (/^0+$/.test(row[2])) fail("Zero is not a target SHA"); }
+    result.set(row[0], [row[1], row[2]]);
+  }
+  return result;
 }
 function promotionSteps(plan, dryRun) {
   return plan.updates.map((update, index) => ({
@@ -344,57 +413,62 @@ function promotionSteps(plan, dryRun) {
   }));
 }
 async function applyPromotion(request, deps, plan, output) {
-  const applied = [];
-  const failureRecord = (update, error) => ({
-    item: update.item,
-    repository: update.repository,
-    ref: update.ref,
-    expectedSha: update.originalSha,
-    targetSha: update.sha,
-    outcome: error instanceof RefUpdateError ? error.outcome : "push-failed",
-    ...(error instanceof RefUpdateError ? { actualSha: error.actualSha } : {}),
-  });
-  for (let index = 0; index < plan.updates.length; index += 1) {
-    const update = plan.updates[index];
-    const step = output.steps[index];
-    if (update.originalSha === update.sha) {
-      step.applyStatus = "unchanged";
-      continue;
-    }
-    try {
-      await pushRefWithLease(deps.runner, repository(request, update.repository), update.ref, update.sha, update.originalSha);
+  await prepareGitRepositories(request, deps, plan.updates);
+  // Recheck the complete pinned plan after object preparation, before first push.
+  await planPromotion(request, deps);
+  await deps.checkpoint(output);
+  let index = 0;
+  try {
+    for (; index < plan.updates.length; index += 1) {
+      const update = plan.updates[index];
+      const step = output.steps[index];
+      deps.cancellation.check();
+      if (update.originalSha === update.sha) { step.applyStatus = "unchanged"; continue; }
+      step.applyStatus = "in-flight";
+      await deps.checkpoint(output);
+      await pushRefWithLease(deps.runner, mutationRepository(deps, update.repository), update.ref, update.sha, update.originalSha, deps.reconcileRunner);
       step.applyStatus = "succeeded";
-      applied.push({ update, step });
-    } catch (error) {
-      step.applyStatus = error instanceof RefUpdateError && error.outcome === "lease-conflict" ? "lease-conflict" : "failed";
-      const rollback = [];
-      for (const previous of [...applied].reverse()) {
-        previous.step.rollback.status = "pending";
-        try {
-          if (previous.update.originalSha === null) {
-            await pushRefWithLease(deps.runner, repository(request, previous.update.repository), previous.update.ref, "0".repeat(40), previous.update.sha);
-          } else {
-            await pushRefWithLease(deps.runner, repository(request, previous.update.repository), previous.update.ref, previous.update.originalSha, previous.update.sha);
-          }
-          previous.step.rollback.status = "succeeded";
-          rollback.push({ item: previous.update.item, repository: previous.update.repository, ref: previous.update.ref, outcome: "restored" });
-        } catch (rollbackError) {
-          const outcome = rollbackError instanceof RefUpdateError && rollbackError.outcome === "lease-conflict" ? "lease-conflict" : "restore-failed";
-          previous.step.rollback.status = outcome;
-          rollback.push({ item: previous.update.item, repository: previous.update.repository, ref: previous.update.ref, outcome });
-        }
-      }
-      output.failure = { original: failureRecord(update, error), rollback };
-      throw new PluginError(`Camble ${plan.environment} promotion failed for ${update.item}`, output);
+      await deps.checkpoint(output);
+      deps.cancellation.check();
     }
+  } catch (error) {
+    const update = plan.updates[Math.min(index, plan.updates.length - 1)];
+    const step = output.steps[Math.min(index, plan.updates.length - 1)];
+    if (step.applyStatus === "in-flight") step.applyStatus = error instanceof RefUpdateError ? error.outcome : "unknown";
+    output.failure = { original: { item: update.item, repository: update.repository, ref: update.ref, expectedSha: update.originalSha, targetSha: update.sha, outcome: deps.cancellation.signal?.aborted ? "cancelled" : error instanceof RefUpdateError ? error.outcome : "push-failed" }, rollback: [] };
+    deps.cancellation.beginRecovery();
+    for (let previous = plan.updates.length - 1; previous >= 0; previous -= 1) {
+      const prior = plan.updates[previous];
+      const priorStep = output.steps[previous];
+      if (priorStep.applyStatus !== "succeeded") continue;
+      priorStep.rollback.status = "pending";
+      await deps.checkpoint(output, "recovering");
+      let outcome;
+      try {
+        await pushRefWithLease(deps.recoveryRunner, mutationRepository(deps, prior.repository), prior.ref, prior.originalSha, prior.sha);
+        priorStep.rollback.status = "succeeded";
+        outcome = "restored";
+      } catch (rollbackError) {
+        outcome = rollbackError instanceof RefUpdateError && rollbackError.outcome === "lease-conflict" ? "lease-conflict" : "restore-failed";
+        priorStep.rollback.status = outcome;
+      }
+      output.failure.rollback.push({ item: prior.item, repository: prior.repository, ref: prior.ref, outcome });
+      await deps.checkpoint(output, "recovering");
+    }
+    output.recoveryRequired = output.steps.some((entry) => ["unknown", "in-flight"].includes(entry.applyStatus) || (entry.applyStatus === "succeeded" && entry.rollback.status !== "succeeded"));
+    await deps.checkpoint(output, output.recoveryRequired ? "recovery-required" : "restored");
+    throw new PluginError(`Camble ${plan.environment} ref promotion failed for ${update.item}; downstream rollout is unverified`, output);
   }
+  deps.cancellation.check();
+  output.refStatus = "refs_updated";
+  await deps.checkpoint(output, "refs-updated");
 }
 async function promote(request, deps) {
   const dryRun = boolean(inputs(request).dryRun, true);
   const plan = await planPromotion(request, deps);
-  const output = { ...plan, dryRun, steps: promotionSteps(plan, dryRun) };
+  const output = { ...plan, dryRun, deploymentStatus: "unverified", refsOnly: true, confirmedPlan: JSON.stringify({ version: 1, environment: plan.environment, services: plan.updates.map((item) => [item.item, item.sha, item.originalSha]) }), steps: promotionSteps(plan, dryRun) };
   if (!dryRun) await applyPromotion(request, deps, plan, output);
-  return ok(`${dryRun ? "Planned" : "Applied"} Camble ${plan.environment} promotion`, output);
+  return ok(`${dryRun ? "Planned" : "Updated"} Camble ${plan.environment} Git refs; downstream deployment unverified`, output);
 }
 
 async function github(request, deps, repo, endpoint, options = {}) {
@@ -1908,13 +1982,15 @@ function refFailure(item, phase, error) {
   };
 }
 async function rollbackClusterBranches(request, deps, plan, output) {
+  deps.cancellation.beginRecovery();
   const outcomes = [];
   for (const item of [...plan].reverse()) {
     const step = output.steps.find((value) => value.phase === "branch" && value.service === item.id);
     if (step.applyStatus !== "succeeded") continue;
     step.rollback.status = "pending";
+    await deps.checkpoint(output, "recovering");
     try {
-      await pushRefWithLease(deps.runner, repository(request, item.repository), item.branchRef, item.originalBranchSha, item.sha);
+      await pushRefWithLease(deps.recoveryRunner, mutationRepository(deps, item.repository), item.branchRef, item.originalBranchSha, item.sha);
       step.rollback.status = "succeeded";
       outcomes.push({ service: item.id, repository: item.repository, ref: item.branchRef, expectedSha: item.sha, targetSha: item.originalBranchSha, outcome: "restored" });
     } catch (error) {
@@ -1931,6 +2007,7 @@ async function rollbackClusterBranches(request, deps, plan, output) {
       });
     }
   }
+  await deps.checkpoint(output, "recovering");
   if (outcomes.length === 0) return { outcome: "not-needed", steps: [] };
   if (outcomes.every((item) => item.outcome === "restored")) return { outcome: "restored", steps: outcomes };
   if (outcomes.every((item) => item.outcome === "lease-conflict")) return { outcome: "lease-conflict", steps: outcomes };
@@ -1973,16 +2050,22 @@ async function clusterDeploy(request, deps) {
     throw new PluginError("Camble cluster deployment found an immutable provenance tag collision", output);
   }
   if (dryRun) return ok("Planned Camble cluster deployment", output);
+  await prepareGitRepositories(request, deps, plan);
+  await deps.checkpoint(output);
 
   for (const item of plan) {
     const step = output.steps.find((value) => value.phase === "immutable-tag" && value.service === item.id);
     if (step.applyStatus === "preexisting") continue;
     try {
-      await pushRefWithLease(deps.runner, repository(request, item.repository), item.tagRef, item.sha, null);
+      deps.cancellation.check();
+      step.applyStatus = "in-flight";
+      await deps.checkpoint(output);
+      await pushRefWithLease(deps.runner, mutationRepository(deps, item.repository), item.tagRef, item.sha, null, deps.reconcileRunner);
       step.applyStatus = "created";
       output.retainedImmutableTags.push({ service: item.id, repository: item.repository, ref: item.tagRef, sha: item.sha });
+      await deps.checkpoint(output);
     } catch (error) {
-      step.applyStatus = error instanceof RefUpdateError && error.outcome === "lease-conflict" ? "lease-conflict" : "failed";
+      if (step.applyStatus !== "created") step.applyStatus = error instanceof RefUpdateError ? error.outcome : "unknown";
       const original = refFailure(item, "immutable-tag", error);
       const rollback = { outcome: "not-needed", steps: [] };
       output.failure = { original, rollback };
@@ -1993,10 +2076,15 @@ async function clusterDeploy(request, deps) {
     const step = output.steps.find((value) => value.phase === "branch" && value.service === item.id);
     if (step.applyStatus === "unchanged") continue;
     try {
-      await pushRefWithLease(deps.runner, repository(request, item.repository), item.branchRef, item.sha, item.originalBranchSha);
+      deps.cancellation.check();
+      step.applyStatus = "in-flight";
+      await deps.checkpoint(output);
+      await pushRefWithLease(deps.runner, mutationRepository(deps, item.repository), item.branchRef, item.sha, item.originalBranchSha, deps.reconcileRunner);
       step.applyStatus = "succeeded";
+      await deps.checkpoint(output);
+      deps.cancellation.check();
     } catch (error) {
-      step.applyStatus = error instanceof RefUpdateError && error.outcome === "lease-conflict" ? "lease-conflict" : "failed";
+      if (step.applyStatus === "in-flight") step.applyStatus = error instanceof RefUpdateError ? error.outcome : "unknown";
       const original = refFailure(item, "branch", error);
       const rollback = await rollbackClusterBranches(request, deps, plan, output);
       output.failure = { original, rollback };
@@ -2007,6 +2095,7 @@ async function clusterDeploy(request, deps) {
   try {
     const deadline = deps.now() + CLUSTER.timeoutSeconds * 1000;
     do {
+      deps.cancellation.check();
       output.cluster = await observe(request, deps, plan);
       if (output.cluster.rolledOut) {
         const unresolved = plan.filter((item) => item.expectedDigest === null);
@@ -2038,6 +2127,7 @@ async function clusterDeploy(request, deps) {
     }));
     const mismatches = output.provenanceRefs.filter((item) => !item.verified);
     if (mismatches.length > 0) throw new ProvenanceMismatchError(mismatches);
+    deps.cancellation.check();
   } catch (error) {
     const original = error instanceof ProvenanceMismatchError
       ? { phase: "post-rollout-provenance", outcome: "immutable-tag-mismatch", mismatches: error.records }
@@ -2049,6 +2139,7 @@ async function clusterDeploy(request, deps) {
         : " observation failed";
     throw new PluginError(`Camble cluster rollout${detail}; branch rollback was ${rollback.outcome}`, output);
   }
+  await deps.checkpoint(output, "rollout-verified");
   return ok("Applied Camble cluster deployment", output);
 }
 
@@ -2056,10 +2147,31 @@ export async function execute(request, overrides = {}) {
   if (!request || request.apiVersion !== 1) fail("Unsupported request apiVersion");
   const platform = overrides.platform ?? process.platform;
   const environment = overrides.environment ?? process.env;
+  const cancellation = createCancellation({ signal: overrides.signal, cleanupMs: overrides.cleanupMs });
+  const runner = overrides.runner ?? createCommandRunner({ platform, environment, tools: request.tools, signal: overrides.signal });
+  const recoveryRunner = (command, args, options = {}) => runner(command, args, { ...options, ...cancellation.recoveryOptions() });
+  let lastOutput;
+  const journal = createRecoveryJournal(request, (value) => redactResponse(value, knownSecretValues(request, environment)), overrides.progress);
   const deps = {
-    runner: overrides.runner ?? createCommandRunner({ platform, environment }),
+    runner: (command, args, options) => { cancellation.check(); return runner(command, args, options); },
+    recoveryRunner,
+    reconcileRunner: (command, args, options) => cancellation.signal?.aborted ? recoveryRunner(command, args, options) : runner(command, args, options),
+    cancellation,
+    checkpoint: async (output, state) => {
+      lastOutput = output;
+      try { await journal(output, state); } catch (error) {
+        output.journalError = "Recovery checkpoint could not be persisted";
+        if (!state || state === "in-progress") throw error;
+      }
+    },
     fetch: overrides.fetch ?? globalThis.fetch,
-    sleep: overrides.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+    sleep: overrides.sleep ?? ((ms) => new Promise((resolve, reject) => {
+      const signal = cancellation.signal;
+      if (signal?.aborted) return reject(new CancellationError());
+      const abort = () => { clearTimeout(timer); reject(new CancellationError()); };
+      const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, ms);
+      signal?.addEventListener("abort", abort, { once: true });
+    })),
     now: overrides.now ?? Date.now,
     progress: overrides.progress ?? (async () => {}),
     browserCapture: overrides.browserCapture ?? (overrides.runner ? captureChromeWithRunner : captureChromeCdp),
@@ -2075,7 +2187,19 @@ export async function execute(request, overrides = {}) {
   const handlers = { collect, promote, "version-inspect": versionInspect, "version-apply": versionApply, "android-build": androidBuild, test: cambleTest, "cluster-observe": clusterObserve, "cluster-logs": clusterLogs, "cluster-deploy": clusterDeploy };
   const id = actionId(request); const handler = handlers[id];
   if (!handler) fail(`Unknown action ${id}`);
-  return handler(request, deps);
+  try {
+    cancellation.check();
+    return await handler(request, deps);
+  } catch (error) {
+    if (lastOutput) {
+      const output = error instanceof PluginError && Object.keys(error.output).length ? error.output : lastOutput;
+      output.cancelled = cancellation.signal?.aborted ?? false;
+      output.recoveryRequired = output.steps?.some((step) => ["in-flight", "unknown"].includes(step.applyStatus) || (step.applyStatus === "succeeded" && step.rollback?.status !== "succeeded")) ?? true;
+      await deps.checkpoint(output, output.recoveryRequired ? "recovery-required" : "failed-recovered");
+      throw new PluginError(error instanceof PluginError ? error.message : "Camble operation interrupted; inspect recovery report", output, error.artifacts ?? []);
+    }
+    throw error;
+  } finally { cancellation.dispose(); }
 }
 
 function knownSecretValues(request, environment) {
@@ -2104,6 +2228,7 @@ function knownSecretValues(request, environment) {
     } catch {}
   }
   for (const name of SECRET_ENV) if (!name.endsWith("_KEY_ALIAS")) add(environment[name]);
+  for (const [name, value] of Object.entries(environment)) if (/^TEAMAI_GIT_TOKEN_\d+$/.test(name) || name === "TEAMAI_GIT_CREDENTIAL_MAP" || /^GIT_CONFIG_VALUE_\d+$/.test(name) && /(?:token|password|authorization|extraheader)/i.test(value)) add(value);
   return unique(values).sort((left, right) => right.length - left.length);
 }
 function redactResponse(value, secrets) {
@@ -2146,16 +2271,23 @@ export function createProgressReporter(request, environment, stream) {
 }
 
 async function main() {
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  process.on("SIGTERM", cancel);
+  process.on("SIGINT", cancel);
   try {
     let raw = "";
     for await (const chunk of process.stdin) { raw += chunk; if (raw.length > 1024 * 1024) fail("Request exceeds limit"); }
     const request = JSON.parse(raw);
-    const result = await executeContract(request, { progress: createProgressReporter(request, process.env, process.stderr) });
+    const result = await executeContract(request, { signal: controller.signal, progress: createProgressReporter(request, process.env, process.stderr) });
     process.stdout.write(`${JSON.stringify(result.response)}\n`);
     process.exitCode = result.exitCode;
   } catch (error) {
     process.stdout.write(`${JSON.stringify(errorResponse(error))}\n`);
     process.exitCode = 1;
+  } finally {
+    process.removeListener("SIGTERM", cancel);
+    process.removeListener("SIGINT", cancel);
   }
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

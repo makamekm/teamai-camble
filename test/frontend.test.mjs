@@ -30,8 +30,8 @@ test("Camble mini-frontend exposes version, build, Preprod and Prod workflows", 
     "Версионирование", "Билд", "Preprod", "Prod", "Обновить из application3/dev",
     "Проставить версию и билд", "Свободный агент", "Собрать application",
     "dev → tags/[service]", "tags/[service] → prod/[service]", "Мультиселект сервисов",
-    "Выделить все", "Сбросить выделение", "Отстал от dev", "Отстал от Preprod",
-    "Актуальный", "Развернуть выбранные", "История и прогресс",
+    "Выделить все", "Сбросить выделение", "Отличается от dev", "Отличается от Preprod",
+    "Актуальный", "Обновить выбранные refs", "История и прогресс",
   ]) assert.ok(component.includes(label), `missing Camble workflow label: ${label}`);
   assert.match(component, /const REQUIRED_ACTIONS = \["version-inspect", "version-apply", "android-build", "collect", "promote"\]/);
   assert.match(component, /role="tablist" aria-label="Camble release workspace"/);
